@@ -105,6 +105,8 @@ export const SERVICE_PAGE: Record<string, string> = {
   userQuestions: 'user-questions.md',
   web: 'web.md',
   workflowEngine: 'workflow.md',
+  workflows: 'workflow.md',
+  workflowSupervisor: 'workflow.md',
   workspaceRegistry: 'workspace.md',
 }
 
@@ -182,6 +184,7 @@ export const EVENT_SCOPE_PAGE: Record<string, string> = {
   'session-telemetry': 'session-telemetry.md',
   'tools': 'tools.md',
   'workflow': 'workflow.md',
+  'workflows': 'workflow.md',
 }
 
 /**
@@ -458,6 +461,11 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   WebSearchRequest: 'web.md',
   WebSearchResult: 'web.md',
   WorkflowRun: 'workflow.md',
+  WorkflowMeta: 'workflow.md',
+  WorkflowPhase: 'workflow.md',
+  WorkflowResult: 'workflow.md',
+  WorkflowStopReason: 'workflow.md',
+  WorkflowRunId: 'workflow.md',
   PresetOption: 'permission-presets.md',
   PresetSpec: 'permission-presets.md',
   InvariantInstaller: 'invariants.md',
@@ -578,6 +586,19 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   WorkflowAgentEndInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowAgentInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowResultInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
+  WorkflowGateInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/types.ts',
+  WorkflowGateKind: 'event-local gate kind union is owned by packages/workflow/workflow/src/types.ts',
+  WorkflowDefinition: 'saved-definition contract is owned by packages/workflow/workflow-registry/README.md',
+  WorkflowDefinitionSummary: 'saved-definition listing contract is owned by packages/workflow/workflow-registry/README.md',
+  WorkflowLookupOptions: 'registry lookup contract is owned by packages/workflow/workflow-registry/README.md',
+  WorkflowCatalogSnapshot: 'registry observation contract is owned by packages/workflow/workflow-registry/README.md',
+  WorkflowScope: 'saved-definition scope tag is owned by packages/workflow/workflow-registry/README.md',
+  WorkflowLaunched: 'supervisor launch result is owned by packages/workflow/workflow-supervisor/README.md',
+  WorkflowValidation: 'supervisor smoke-check outcome is owned by packages/workflow/workflow-supervisor/README.md',
+  WorkflowSaveScope: 'supervisor save scope is owned by packages/workflow/workflow-supervisor/README.md',
+  WorkflowRunView: 'supervisor run view is owned by packages/workflow/workflow-supervisor/README.md',
+  WorkflowRunStatus: 'supervisor run status is owned by packages/workflow/workflow-supervisor/README.md',
+  WorkflowRunMemberView: 'supervisor member view is owned by packages/workflow/workflow-supervisor/README.md',
 }
 
 /** Repository data policy consumed by the Cordis catalog projector. */

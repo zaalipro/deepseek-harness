@@ -16,6 +16,9 @@ import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools/presen
 import type { RpcError, RpcId, RpcRequest } from './rpc.ts'
 import type { JobView } from './jobs.ts'
 import type { WorkspaceView } from './workspace.ts'
+import type { WorkflowRunView } from '@deepseek-ai/dsh-workflow-supervisor/types'
+
+export type { WorkflowRunView }
 
 // Client-side consumers take the render-intent vocabulary from the contract;
 // dsh-tools remains its owner.
@@ -96,6 +99,14 @@ export type MuxFrame =
    * express.
    */
   | { type: 'session/jobs'; sessionId: SessionId; jobs: JobView[] }
+  /**
+   * Complete set of supervised workflow runs one session can see, after every
+   * run change (start, progress, park, settle, pause, resume, stop, save). The
+   * supervisor is process-local, so — exactly like `session/queue` and
+   * `session/jobs` — the whole snapshot is the authoritative value; runs that
+   * never started send no baseline (an absent key means an empty set).
+   */
+  | { type: 'session/workflow-runs'; sessionId: SessionId; runs: WorkflowRunView[] }
   /**
    * One projection unit's finished value changed (session-projection RFC).
    * Live push state, never logged — replay recomputes on the host (the

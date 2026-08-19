@@ -4,9 +4,17 @@
 
 工作流 seam 允许 agent（智能体）运行由模型编写、会启动 subagent 的编排脚本。与 [subagent](subagent.md) 一样，它是**一项可选能力**，不属于 agent loop，因此其类型和操作记录在此处，而非 [core.md](core.md)。与 bash 一样，每个上下文只允许一个引擎实现提供 `ctx.workflowEngine`；没有命名提供方注册表（第二个引擎通过插件配置替换第一个，而不与它同时运行）。
 
-Service Definition：[dsh-workflow](../../packages/workflow/workflow)（`ctx.workflowEngine` + 下文词汇）。Service Provider 是 [dsh-workflow-worker-thread](../../packages/workflow/workflow-worker-thread)（一个 `node:worker_threads` 引擎——每个 run 一个 worker，脚本的 vm 上下文位于其中）；面向模型的 Consumer 是 [dsh-tool-workflow](../../packages/workflow/tool-workflow)。提案与设计理由见 [dynamic-workflows Agent Note](../../.agents/notes/implemented/feature/2026-07-05-dynamic-workflows.md)。
+Service Definition：[dsh-workflow](../../packages/workflow/workflow)（`ctx.workflowEngine` + 下文词汇）。Service Provider 是 [dsh-workflow-worker-thread](../../packages/workflow/workflow-worker-thread)（一个 `node:worker_threads` 引擎——每个 run 一个 worker，脚本的 vm 上下文位于其中）；面向模型的 Consumer 是 [dsh-tool-workflow](../../packages/workflow/tool-workflow)。已保存定义位于 [dsh-workflow-registry](../../packages/workflow/workflow-registry)（`ctx.workflows`），后台运行生命周期位于 [dsh-workflow-supervisor](../../packages/workflow/workflow-supervisor)（`ctx.workflowSupervisor`），[dsh-command-workflows](../../packages/workflow/command-workflows) 注册 `/workflow` 斜杠命令。提案与设计理由见 [dynamic-workflows Agent Note](../../.agents/notes/implemented/feature/2026-07-05-dynamic-workflows.md) 与 [已保存工作流与运行监督器](../../.agents/notes/implemented/feature/2026-08-17-saved-workflow-supervisor.md)。
 
 源码：浏览器安全词汇位于 [`packages/workflow/workflow/src/types.ts`](../../packages/workflow/workflow/src/types.ts)，Host 请求与活跃运行句柄位于 [`runtime-types.ts`](../../packages/workflow/workflow/src/runtime-types.ts)。
+
+## 已保存定义
+
+已保存工作流是位于 project（`.dsh/workflows`）、user（`<dshHome>/workflows`）或 bundled 根目录下的 JSON 封套 `<name>.workflow.json`，按 bundled > project > user 优先级发现。封套是 `{ meta, script }`：`meta` 作为脚本之外的数据校验，文件名必须等于 `meta.name`（kebab-case），未知 meta 字段大声失败。`ctx.workflows.list()` 提供排序摘要；`get(name)` 加载完整定义。chokidar 监视器使目录失效并发 `workflows/change`。
+
+## 运行、显示名与监督器
+
+`ctx.workflowSupervisor.start()` 在后台启动一次运行，返回会话唯一 **显示名**——首个存活/保留运行是 `meta.name`，之后是 `meta.name-2`、`meta.name-3`——从不是内部 id。监督器拥有存活的 `WorkflowRun` 句柄，每次运行写出可编辑的 `script.js` 投影和 `scratch/` 目录，按调用顺序记录已提交的 `agent()` 结果，并把运行投影为整集 `session/workflow-runs` 帧推送给浏览器。`pause` 取消并保留 journal；`resume` 用 journal 回放重执行不可变的脚本/args/预算；脚本级 `pause()`/`await_user()` 门控显示 `Needs input`；`stop` 取消，`save` 把投影写回定义（拒绝内置项与带编号句柄），进程退出把活动运行标记为 `Interrupted`。
 
 ## 启动请求
 
@@ -29,6 +37,12 @@ interface WorkflowStartRequest {
   subagentProvider?: string
   /** Optional per-run total-child ceiling. */
   maxTotalAgents?: number
+  /** Committed host-call results to replay instead of relaunching children; omitted for a fresh start. */
+  journal?: readonly WorkflowJournalEntry[]
+  /** Absolute run directory owning per-run scratch files; omitted when scratch is unavailable. */
+  scratchDir?: string
+  /** Smoke-check mode: canned `agent()` results, no children, no journal persistence. */
+  validateOnly?: boolean
   /** The agent on whose behalf the run executes (parent of every child). */
   parent: Agent
   /** Cancels the run when aborted. */
@@ -96,8 +110,9 @@ interface WorkflowResult {
 
 ```ts type-equiv
 /**
- * Holder-owned live workflow. `result` never rejects; consumers may cancel
- * and must call idempotent `dispose()` to await script and child quiescence.
+ * Holder-owned live workflow. `result` never rejects; consumers may cancel,
+ * resume a parked gate, and must call idempotent `dispose()` to await script
+ * and child quiescence.
  */
 interface WorkflowRun {
   readonly id: WorkflowRunId
@@ -106,6 +121,8 @@ interface WorkflowRun {
   readonly result: Promise<WorkflowResult>
   /** Cancel the run and its children. */
   cancel(reason?: string): void
+  /** Resume a parked `pause()`/`await_user()` gate; a no-op when not parked. */
+  resume(): void
   /** Cancel if needed and await bounded settlement and cleanup. */
   dispose(): Promise<void>
 }
@@ -151,7 +168,113 @@ Workflow Service Definition contract. Invalid requests throw before publication;
 abstract start(request: WorkflowStartRequest): WorkflowRun
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:157`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:135`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="ctxworkflows--workflowregistry"></a>
+
+### `ctx.workflows` — `WorkflowRegistry`
+
+Saved-workflow definition registry (`ctx.workflows`). Discoveries are cached per project root + root set; `workflows/change` invalidates them. A malformed definition file fails discovery loud with its path and reason.
+
+```ts cordis-catalog
+/**
+ * List invocation-neutral summaries for one workspace.
+ * @param options - `cwd` selects the project root; `signal` cancels discovery.
+ * @returns sorted winning summaries.
+ */
+async list(options: WorkflowLookupOptions = {}): Promise<WorkflowDefinitionSummary[]>
+
+/**
+ * Observe the current catalog and whether discovery completed within a stable revision.
+ * @param options - `cwd` selects the project root; `signal` cancels discovery.
+ * @returns sorted definitions plus the completion flag.
+ */
+async snapshot(options: WorkflowLookupOptions = {}): Promise<WorkflowCatalogSnapshot>
+
+/**
+ * Load and validate the full definition for one name (the winning scope's file).
+ * @param name - kebab-case workflow name.
+ * @param options - `cwd` selects the project root; `signal` cancels discovery.
+ * @returns the full definition, or `undefined` when no scope supplies it.
+ */
+async get(name: string, options: WorkflowLookupOptions = {}): Promise<WorkflowDefinition | undefined>
+```
+
+Source: [`packages/workflow/workflow-registry/src/index.ts:208`](../../packages/workflow/workflow-registry/src/index.ts)
+
+<a id="ctxworkflowsupervisor--workflowsupervisor"></a>
+
+### `ctx.workflowSupervisor` — `WorkflowSupervisor`
+
+Run supervisor. Background launch returns the display handle immediately; the supervisor owns the returned `WorkflowRun`, routes `workflow/*` events into each run's live view, and posts a completion notice to the parent session. Same-process pause saves the committed host-call journal; resume replays it under the original immutable script, args, and budget.
+
+```ts cordis-catalog
+/**
+ * Launch one workflow run in the background (or smoke-check it).
+ * @param spec - the run source, args, budget, and parent agent.
+ * @returns the display handle and started status immediately.
+ */
+async start(spec: { definition?: WorkflowDefinition | undefined script?: string | undefined meta?: WorkflowMeta | undefined args?: unknown agentBudget?: number parent: Agent }): Promise<WorkflowLaunched>
+
+/**
+ * Smoke-check one path with canned hosts; never starts a live run.
+ * @param spec - the run source, args, and parent agent.
+ * @returns `ok: true` with the smoke result, or `ok: false` with the failure.
+ */
+async validate(spec: { definition?: WorkflowDefinition | undefined script?: string | undefined meta?: WorkflowMeta | undefined args?: unknown parent?: Agent | undefined }): Promise<WorkflowValidation>
+
+/**
+ * Pause a running run: cancel it and keep the committed journal for resume.
+ * @param displayName - the run's session display handle.
+ * @param agent - the session-owning agent fencing the run.
+ */
+pause(displayName: string, agent: Agent): void
+
+/**
+ * Resume a parked gate (alive worker) or a paused run (journal replay).
+ * @param displayName - the run's session display handle.
+ * @param agent - the session-owning agent fencing the run.
+ */
+resume(displayName: string, agent: Agent): void
+
+/**
+ * Resume by internal run id (the model-facing tool path). Returns the display handle.
+ * @param runId - the engine-minted run id returned by a launch.
+ * @param agent - the session-owning agent fencing the run.
+ * @returns the resumed run's display handle.
+ */
+resumeById(runId: string, agent: Agent): string
+
+/**
+ * Stop a run: cancel it and mark it cancelled.
+ * @param displayName - the run's session display handle.
+ * @param agent - the session-owning agent fencing the run.
+ */
+stop(displayName: string, agent: Agent): void
+
+/**
+ * Save the run's script projection as a project or user definition.
+ * @param displayName - the run's session display handle.
+ * @param agent - the session-owning agent fencing the run.
+ * @param scope - target scope (`project` or `user`); defaults to the config value.
+ * @returns the written `.workflow.json` path.
+ */
+async save(displayName: string, agent: Agent, scope?: WorkflowSaveScope): Promise<string>
+
+/**
+ * List every retained run for one agent's session, live-first.
+ * @param agent - the reading agent; a non-agent caller sees nothing.
+ * @returns the session's run views in start order (live runs first).
+ */
+listRuns(agent?: Agent | undefined): WorkflowRunView[]
+
+/** Mark every live run interrupted on process exit (called via beforeExit hook). */
+markInterrupted(): void
+```
+
+Types: [Agent](core.md)
+
+Source: [`packages/workflow/workflow-supervisor/src/index.ts:174`](../../packages/workflow/workflow-supervisor/src/index.ts)
 
 <a id="workflow-events"></a>
 
@@ -177,7 +300,28 @@ One `agent()` call settled (clean result, child failure, or run cancellation). P
 'workflow/agent-end'(info: WorkflowRunInfo, agent: WorkflowAgentEndInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:79`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:93`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="workflowagent-result--emit"></a>
+
+#### `workflow/agent-result` — emit
+
+One committed `agent()` result, in call order — the journal a same-process resume replays instead of relaunching the child. Emitted only for live calls (journal-replayed calls emit nothing).
+
+```ts cordis-catalog
+/**
+ * One committed `agent()` result, in call order — the journal a same-process
+ * resume replays instead of relaunching the child. Emitted only for live
+ * calls (journal-replayed calls emit nothing).
+ * @param info - the run's identity snapshot.
+ * @param seq - the 1-based agent() call sequence the result commits to.
+ * @param result - the script-visible result (text, structured object, or `null`).
+ * @mode emit
+ */
+'workflow/agent-result'(info: WorkflowRunInfo, seq: number, result: unknown): void
+```
+
+Source: [`packages/workflow/workflow/src/index.ts:103`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowagent-start--emit"></a>
 
@@ -198,7 +342,7 @@ One `agent()` call established a published child run. Paired with Events['workfl
 'workflow/agent-start'(info: WorkflowRunInfo, agent: WorkflowAgentInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:68`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:82`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowend--emit"></a>
 
@@ -219,7 +363,27 @@ A workflow run settled (any stop reason). Fired when WorkflowRun.result resolves
 'workflow/end'(info: WorkflowRunInfo, result: WorkflowResultInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:89`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:113`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="workflowgate--emit"></a>
+
+#### `workflow/gate` — emit
+
+The script parked the run on a human gate (a `pause()`/`await_user()` call). `resumable` distinguishes a gate resume passes (`await_user`) from one it re-fires (`pause`).
+
+```ts cordis-catalog
+/**
+ * The script parked the run on a human gate (a `pause()`/`await_user()`
+ * call). `resumable` distinguishes a gate resume passes (`await_user`)
+ * from one it re-fires (`pause`).
+ * @param info - the run's identity snapshot.
+ * @param gate - the gate kind, message, and resumability.
+ * @mode emit
+ */
+'workflow/gate'(info: WorkflowRunInfo, gate: WorkflowGateInfo): void
+```
+
+Source: [`packages/workflow/workflow/src/index.ts:72`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowlog--emit"></a>
 
@@ -237,7 +401,7 @@ The script emitted a narration line (a `log(message)` call).
 'workflow/log'(info: WorkflowRunInfo, message: string): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:58`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:63`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowphase--emit"></a>
 
@@ -256,7 +420,7 @@ The script entered a phase (a `phase(title)` call) — progress grouping for obs
 'workflow/phase'(info: WorkflowRunInfo, title: string): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:51`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:56`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowstart--emit"></a>
 
@@ -274,5 +438,44 @@ A workflow run started — the script's meta block validated, the body about to 
 'workflow/start'(info: WorkflowRunInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:43`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:48`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="workflows-events"></a>
+
+### `workflows/*` events
+
+<a id="workflowschange--emit"></a>
+
+#### `workflows/change` — emit
+
+A workflow definition root changed (file added, removed, or rewritten), or the registry's own root set changed. Unfiltered: consumers refetch the catalog for their own lookup options.
+
+```ts cordis-catalog
+/**
+ * A workflow definition root changed (file added, removed, or rewritten),
+ * or the registry's own root set changed. Unfiltered: consumers refetch
+ * the catalog for their own lookup options.
+ * @mode emit
+ */
+'workflows/change'(): void
+```
+
+Source: [`packages/workflow/workflow-registry/src/index.ts:59`](../../packages/workflow/workflow-registry/src/index.ts)
+
+<a id="workflowsrun-change--emit"></a>
+
+#### `workflows/run-change` — emit
+
+One supervised run's visible set changed (start, progress, park, settle, pause, resume, stop, save). Unfiltered; consumers re-read `listRuns`.
+
+```ts cordis-catalog
+/**
+ * One supervised run's visible set changed (start, progress, park, settle,
+ * pause, resume, stop, save). Unfiltered; consumers re-read `listRuns`.
+ * @mode emit
+ */
+'workflows/run-change'(): void
+```
+
+Source: [`packages/workflow/workflow-supervisor/src/index.ts:63`](../../packages/workflow/workflow-supervisor/src/index.ts)
 <!-- END GENERATED cordis-surface -->

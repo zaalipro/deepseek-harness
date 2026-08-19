@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-workflow-worker-thread/protocol
  */
 
-import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowResult } from '@deepseek-ai/dsh-workflow'
+import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowGateInfo, WorkflowResult } from '@deepseek-ai/dsh-workflow'
 import type { ChildResult, ChildStartRequest } from './types.ts'
 
 /** Message tags the worker sends the host (the wire values are the tag strings). */
@@ -22,10 +22,18 @@ export enum WorkerToHostType {
   AgentStart = 'agent-start',
   /** Observer lifecycle: one `agent()` call settled. */
   AgentEnd = 'agent-end',
+  /** Observer gate: the script parked on a `pause()`/`await_user()` call. */
+  Gate = 'gate',
+  /** Journal: one committed `agent()` result, appended to the host-side journal. */
+  AgentResult = 'agent-result',
   /** Child RPC: start a child on the host (answered by ChildStarted or ChildStartError). */
   ChildStart = 'child-start',
   /** Child RPC: dispose a started child (answered by ChildDisposed). */
   ChildDispose = 'child-dispose',
+  /** Scratch RPC: write one single-component scratch file (answered by ScratchWritten). */
+  ScratchWrite = 'scratch-write',
+  /** Scratch RPC: read one single-component scratch file (answered by ScratchReadResult). */
+  ScratchRead = 'scratch-read',
   /** The run's single terminal result. */
   Result = 'result',
 }
@@ -42,10 +50,18 @@ export interface WorkerToHostPayloads {
   [WorkerToHostType.AgentStart]: { info: WorkflowAgentInfo }
   /** The call identity plus its outcome. */
   [WorkerToHostType.AgentEnd]: { info: WorkflowAgentEndInfo }
+  /** A parked gate's kind, message, and resumability. */
+  [WorkerToHostType.Gate]: { gate: WorkflowGateInfo }
+  /** One committed agent result (the script-visible value; `null` for a failed child). */
+  [WorkerToHostType.AgentResult]: { seq: number; result: unknown }
   /** The RPC correlation id and the prompt plus validated options. */
   [WorkerToHostType.ChildStart]: { callId: number; request: ChildStartRequest }
   /** The RPC correlation id of the child to dispose. */
   [WorkerToHostType.ChildDispose]: { callId: number }
+  /** The RPC correlation id, file name, and content to write. */
+  [WorkerToHostType.ScratchWrite]: { callId: number; name: string; content: string }
+  /** The RPC correlation id and file name to read. */
+  [WorkerToHostType.ScratchRead]: { callId: number; name: string }
   /** The run's terminal outcome. */
   [WorkerToHostType.Result]: { result: WorkflowResult }
 }
@@ -56,6 +72,8 @@ export enum HostToWorkerType {
   Go = 'go',
   /** Cancel the run: hooks start throwing and the script dies at its next await. */
   Cancel = 'cancel',
+  /** Resume a parked gate: `await_user` returns, `pause` re-fires. */
+  Resume = 'resume',
   /** Child RPC reply: the provider fulfilled with a published run (exactly one start reply per ChildStart). */
   ChildStarted = 'child-started',
   /** Child RPC reply: the provider's asynchronous start failed. */
@@ -66,6 +84,10 @@ export enum HostToWorkerType {
   ChildFailed = 'child-failed',
   /** Child RPC reply: a requested disposal completed. */
   ChildDisposed = 'child-disposed',
+  /** Scratch RPC reply: a write completed. */
+  ScratchWritten = 'scratch-written',
+  /** Scratch RPC reply: a read completed with content, or undefined when absent. */
+  ScratchReadResult = 'scratch-read-result',
 }
 
 /** The payload each host→worker tag carries. */
@@ -74,6 +96,8 @@ export interface HostToWorkerPayloads {
   [HostToWorkerType.Go]: Record<never, never>
   /** The cancel reason, canonical for the whole run. */
   [HostToWorkerType.Cancel]: { reason: string }
+  /** Resume carries nothing: release the parked gate. */
+  [HostToWorkerType.Resume]: Record<never, never>
   /** The RPC correlation id and the child agent's id (minted by the subagent seam). */
   [HostToWorkerType.ChildStarted]: { callId: number; childId: string }
   /** The RPC correlation id and the rendered start failure. */
@@ -84,6 +108,10 @@ export interface HostToWorkerPayloads {
   [HostToWorkerType.ChildFailed]: { callId: number; rendered: string }
   /** The RPC correlation id of the completed disposal. */
   [HostToWorkerType.ChildDisposed]: { callId: number }
+  /** The RPC correlation id of the completed write. */
+  [HostToWorkerType.ScratchWritten]: { callId: number }
+  /** The RPC correlation id and read content (absent content = file missing). */
+  [HostToWorkerType.ScratchReadResult]: { callId: number; content?: string }
 }
 
 /**

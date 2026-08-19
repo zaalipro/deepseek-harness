@@ -94,6 +94,25 @@
     - id: plugin-inventory
       name: '@deepseek-ai/dsh-host-plugin-inventory'
 
+    # Saved-workflow definitions (`.dsh/workflows/*.workflow.json` + user +
+    # bundled roots): discovery, meta-as-data validation, watcher, workflows/change.
+    - id: workflow-registry
+      name: '@deepseek-ai/dsh-workflow-registry'
+      config:
+        dshHome: !!js dshHomePath()
+
+    # Run supervisor over ctx.workflowEngine: session display handles,
+    # background runs, same-process journal resume, pause/resume/stop/save.
+    - id: workflow-supervisor
+      name: '@deepseek-ai/dsh-workflow-supervisor'
+      config:
+        dshHome: !!js dshHomePath()
+        runsRoot: !!js dshHomePath('workflow-runs')
+
+    # Host commands: /workflow, /workflows, /create-workflow + one per saved name.
+    - id: workflow-commands
+      name: '@deepseek-ai/dsh-command-workflows'
+
     # The API gateway: the transport-agnostic dispatch face every client shape
     # shares. The base layer's agent-default-model service owns the default model.
     - id: api-gateway
@@ -209,6 +228,10 @@
     # existing generic workflow tool row.
     - id: ui-workflow-run
       name: '@deepseek-ai/dsh-client-ui-workflow-run'
+
+    # Fullscreen run dashboard over the workflowRunsBySession mirror.
+    - id: ui-workflows
+      name: '@deepseek-ai/dsh-client-ui-workflows'
 
     # Turn tail: the produced-files row under each closing assistant message.
     # Remove this entry to turn the surface off; the tail hole renders empty.
@@ -389,8 +412,11 @@
 # scope-aware — one copy per mounted preset means every child gets `report`
 # registered once per live session, which throws on the second.
 
-- id: workflow-worker-thread
-  disabled: true
+# `workflow-worker-thread` STAYS host-plane here (the base row): the run
+# supervisor and the /workflow commands — both host-plane — read it, and they
+# read it outside any agent's realm, so the "nothing outside an agent reads
+# workflows" premise behind the preset-scoped copy no longer holds. Only the
+# model-facing tool moves behind presets.
 
 - id: tool-workflow
   disabled: true

@@ -2105,6 +2105,88 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'workflows',
+    summary: 'Saved-workflow definition registry (`ctx.workflows`).',
+    description: 'Saved-workflow definition registry (`ctx.workflows`). Discoveries are cached per project root + root set; `workflows/change` invalidates them. A malformed definition file fails discovery loud with its path and reason.',
+    methods: [
+      {
+        signature: 'async list(options: WorkflowLookupOptions = {}): Promise<WorkflowDefinitionSummary[]>',
+        description: 'List invocation-neutral summaries for one workspace.',
+        parameters: [{ name: 'options', description: '`cwd` selects the project root; `signal` cancels discovery.' }],
+        returns: 'sorted winning summaries.',
+      },
+      {
+        signature: 'async snapshot(options: WorkflowLookupOptions = {}): Promise<WorkflowCatalogSnapshot>',
+        description: 'Observe the current catalog and whether discovery completed within a stable revision.',
+        parameters: [{ name: 'options', description: '`cwd` selects the project root; `signal` cancels discovery.' }],
+        returns: 'sorted definitions plus the completion flag.',
+      },
+      {
+        signature: 'async get(name: string, options: WorkflowLookupOptions = {}): Promise<WorkflowDefinition | undefined>',
+        description: 'Load and validate the full definition for one name (the winning scope\'s file).',
+        parameters: [{ name: 'name', description: 'kebab-case workflow name.' }, { name: 'options', description: '`cwd` selects the project root; `signal` cancels discovery.' }],
+        returns: 'the full definition, or `undefined` when no scope supplies it.',
+      },
+    ],
+  },
+  {
+    key: 'workflowSupervisor',
+    summary: 'Run supervisor.',
+    description: 'Run supervisor. Background launch returns the display handle immediately; the supervisor owns the returned `WorkflowRun`, routes `workflow/*` events into each run\'s live view, and posts a completion notice to the parent session. Same-process pause saves the committed host-call journal; resume replays it under the original immutable script, args, and budget.',
+    methods: [
+      {
+        signature: 'async start(spec: { definition?: WorkflowDefinition | undefined script?: string | undefined meta?: WorkflowMeta | undefined args?: unknown agentBudget?: number parent: Agent }): Promise<WorkflowLaunched>',
+        description: 'Launch one workflow run in the background (or smoke-check it).',
+        parameters: [{ name: 'spec', description: 'the run source, args, budget, and parent agent.' }],
+        returns: 'the display handle and started status immediately.',
+      },
+      {
+        signature: 'async validate(spec: { definition?: WorkflowDefinition | undefined script?: string | undefined meta?: WorkflowMeta | undefined args?: unknown parent?: Agent | undefined }): Promise<WorkflowValidation>',
+        description: 'Smoke-check one path with canned hosts; never starts a live run.',
+        parameters: [{ name: 'spec', description: 'the run source, args, and parent agent.' }],
+        returns: '`ok: true` with the smoke result, or `ok: false` with the failure.',
+      },
+      {
+        signature: 'pause(displayName: string, agent: Agent): void',
+        description: 'Pause a running run: cancel it and keep the committed journal for resume.',
+        parameters: [{ name: 'displayName', description: 'the run\'s session display handle.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }],
+      },
+      {
+        signature: 'resume(displayName: string, agent: Agent): void',
+        description: 'Resume a parked gate (alive worker) or a paused run (journal replay).',
+        parameters: [{ name: 'displayName', description: 'the run\'s session display handle.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }],
+      },
+      {
+        signature: 'resumeById(runId: string, agent: Agent): string',
+        description: 'Resume by internal run id (the model-facing tool path). Returns the display handle.',
+        parameters: [{ name: 'runId', description: 'the engine-minted run id returned by a launch.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }],
+        returns: 'the resumed run\'s display handle.',
+      },
+      {
+        signature: 'stop(displayName: string, agent: Agent): void',
+        description: 'Stop a run: cancel it and mark it cancelled.',
+        parameters: [{ name: 'displayName', description: 'the run\'s session display handle.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }],
+      },
+      {
+        signature: 'async save(displayName: string, agent: Agent, scope?: WorkflowSaveScope): Promise<string>',
+        description: 'Save the run\'s script projection as a project or user definition.',
+        parameters: [{ name: 'displayName', description: 'the run\'s session display handle.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }, { name: 'scope', description: 'target scope (`project` or `user`); defaults to the config value.' }],
+        returns: 'the written `.workflow.json` path.',
+      },
+      {
+        signature: 'listRuns(agent?: Agent | undefined): WorkflowRunView[]',
+        description: 'List every retained run for one agent\'s session, live-first.',
+        parameters: [{ name: 'agent', description: 'the reading agent; a non-agent caller sees nothing.' }],
+        returns: 'the session\'s run views in start order (live runs first).',
+      },
+      {
+        signature: 'markInterrupted(): void',
+        description: 'Mark every live run interrupted on process exit (called via beforeExit hook).',
+        parameters: [],
+      },
+    ],
+  },
+  {
     key: 'workspaceRegistry',
     summary: 'Durable workspace registry.',
     description: 'Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker.',
@@ -2566,6 +2648,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'agent', description: 'the call identity plus its outcome.' }],
   },
   {
+    name: 'workflow/agent-result',
+    mode: 'emit',
+    signature: '\'workflow/agent-result\'(info: WorkflowRunInfo, seq: number, result: unknown): void',
+    summary: 'One committed `agent()` result, in call order — the journal a same-process resume replays instead of relaunching the child.',
+    description: 'One committed `agent()` result, in call order — the journal a same-process resume replays instead of relaunching the child. Emitted only for live calls (journal-replayed calls emit nothing).',
+    parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'seq', description: 'the 1-based agent() call sequence the result commits to.' }, { name: 'result', description: 'the script-visible result (text, structured object, or `null`).' }],
+  },
+  {
     name: 'workflow/agent-start',
     mode: 'emit',
     signature: '\'workflow/agent-start\'(info: WorkflowRunInfo, agent: WorkflowAgentInfo): void',
@@ -2580,6 +2670,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'A workflow run settled (any stop reason).',
     description: 'A workflow run settled (any stop reason). Fired when WorkflowRun.result resolves. Paired with Events[\'workflow/start\'].',
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'result', description: 'the outcome data (stop reason, error, agent count) — deliberately WITHOUT the result value (see {@link WorkflowResultInfo}).' }],
+  },
+  {
+    name: 'workflow/gate',
+    mode: 'emit',
+    signature: '\'workflow/gate\'(info: WorkflowRunInfo, gate: WorkflowGateInfo): void',
+    summary: 'The script parked the run on a human gate (a `pause()`/`await_user()` call).',
+    description: 'The script parked the run on a human gate (a `pause()`/`await_user()` call). `resumable` distinguishes a gate resume passes (`await_user`) from one it re-fires (`pause`).',
+    parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'gate', description: 'the gate kind, message, and resumability.' }],
   },
   {
     name: 'workflow/log',
@@ -2604,6 +2702,22 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'A workflow run started — the script\'s meta block validated, the body about to execute.',
     description: 'A workflow run started — the script\'s meta block validated, the body about to execute. Paired with Events[\'workflow/end\'].',
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot (id + meta).' }],
+  },
+  {
+    name: 'workflows/change',
+    mode: 'emit',
+    signature: '\'workflows/change\'(): void',
+    summary: 'A workflow definition root changed (file added, removed, or rewritten), or the registry\'s own root set changed.',
+    description: 'A workflow definition root changed (file added, removed, or rewritten), or the registry\'s own root set changed. Unfiltered: consumers refetch the catalog for their own lookup options.',
+    parameters: [],
+  },
+  {
+    name: 'workflows/run-change',
+    mode: 'emit',
+    signature: '\'workflows/run-change\'(): void',
+    summary: 'One supervised run\'s visible set changed (start, progress, park, settle, pause, resume, stop, save).',
+    description: 'One supervised run\'s visible set changed (start, progress, park, settle, pause, resume, stop, save). Unfiltered; consumers re-read `listRuns`.',
+    parameters: [],
   },
 ]
 
@@ -4610,6 +4724,38 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type WorkflowAgentOutcome = \'completed\' | \'failed\' | \'cancelled\';',
   },
   {
+    name: 'WorkflowCatalogSnapshot',
+    declaration: 'export interface WorkflowCatalogSnapshot {\n    readonly definitions: readonly WorkflowDefinitionSummary[];\n    readonly complete: boolean;\n}',
+  },
+  {
+    name: 'WorkflowDefinition',
+    declaration: 'export interface WorkflowDefinition extends WorkflowDefinitionSummary {\n    readonly script: string;\n}',
+  },
+  {
+    name: 'WorkflowDefinitionSummary',
+    declaration: 'export interface WorkflowDefinitionSummary {\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly phases?: readonly WorkflowPhase[];\n    readonly scope: WorkflowScope;\n    readonly path?: string;\n}',
+  },
+  {
+    name: 'WorkflowGateInfo',
+    declaration: 'export interface WorkflowGateInfo {\n    readonly kind: WorkflowGateKind;\n    readonly message: string;\n    readonly resumable: boolean;\n}',
+  },
+  {
+    name: 'WorkflowGateKind',
+    declaration: 'export type WorkflowGateKind = \'user\' | \'back_off\' | \'no_progress\' | \'verification\' | \'infra\';',
+  },
+  {
+    name: 'WorkflowJournalEntry',
+    declaration: 'export interface WorkflowJournalEntry {\n    readonly seq: number;\n    readonly result: unknown;\n}',
+  },
+  {
+    name: 'WorkflowLaunched',
+    declaration: 'export interface WorkflowLaunched {\n    readonly displayName: string;\n    readonly runId: WorkflowRunId;\n    readonly scriptPath?: string;\n    readonly status: \'started\';\n}',
+  },
+  {
+    name: 'WorkflowLookupOptions',
+    declaration: 'export interface WorkflowLookupOptions {\n    readonly cwd?: string;\n    readonly signal?: AbortSignal;\n}',
+  },
+  {
     name: 'WorkflowMeta',
     declaration: 'export interface WorkflowMeta {\n    name: string;\n    description: string;\n    whenToUse?: string;\n    phases?: WorkflowPhase[];\n}',
   },
@@ -4627,7 +4773,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowRun',
-    declaration: 'export interface WorkflowRun {\n    readonly id: WorkflowRunId;\n    readonly meta: WorkflowMeta;\n    readonly result: Promise<WorkflowResult>;\n    cancel(reason?: string): void;\n    dispose(): Promise<void>;\n}',
+    declaration: 'export interface WorkflowRun {\n    readonly id: WorkflowRunId;\n    readonly meta: WorkflowMeta;\n    readonly result: Promise<WorkflowResult>;\n    cancel(reason?: string): void;\n    resume(): void;\n    dispose(): Promise<void>;\n}',
   },
   {
     name: 'WorkflowRunId',
@@ -4638,12 +4784,32 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface WorkflowRunInfo {\n    id: WorkflowRunId;\n    meta: WorkflowMeta;\n}',
   },
   {
+    name: 'WorkflowRunMemberView',
+    declaration: 'export interface WorkflowRunMemberView {\n    readonly seq: number;\n    readonly label: string;\n    readonly phase?: string;\n    readonly status: \'running\' | \'completed\' | \'failed\' | \'cancelled\';\n}',
+  },
+  {
+    name: 'WorkflowRunView',
+    declaration: 'export interface WorkflowRunView {\n    readonly runId: WorkflowRunId;\n    readonly displayName: string;\n    readonly name: string;\n    readonly description: string;\n    readonly status: WorkflowRunStatus;\n    readonly phase?: string;\n    readonly phases?: readonly WorkflowPhase[];\n    readonly budget: {\n        readonly total: number;\n        readonly spent: number;\n        readonly remaining: number;\n    };\n    readonly members: readonly WorkflowRunMemberView[];\n    readonly logs: readonly string[];\n    readonly result?: unknown;\n    readonly error?: string;\n    readonly gate?: WorkflowGateInfo;\n    readonly builtin: boolean;\n    readonly numberedHandle: boolean;\n    readonly scriptPath?: string;\n    readonly startedAt: number;\n    readonly settledAt?: number;\n}',
+  },
+  {
+    name: 'WorkflowSaveScope',
+    declaration: 'export type WorkflowSaveScope = Extract<WorkflowScope, \'project\' | \'user\'>;',
+  },
+  {
+    name: 'WorkflowScope',
+    declaration: 'export type WorkflowScope = \'bundled\' | \'project\' | \'user\';',
+  },
+  {
     name: 'WorkflowStartRequest',
-    declaration: 'export interface WorkflowStartRequest {\n    script: string;\n    meta: WorkflowMeta;\n    args?: unknown;\n    subagentProvider?: string;\n    maxTotalAgents?: number;\n    parent: Agent;\n    signal?: AbortSignal;\n}',
+    declaration: 'export interface WorkflowStartRequest {\n    script: string;\n    meta: WorkflowMeta;\n    args?: unknown;\n    subagentProvider?: string;\n    maxTotalAgents?: number;\n    journal?: readonly WorkflowJournalEntry[];\n    scratchDir?: string;\n    validateOnly?: boolean;\n    parent: Agent;\n    signal?: AbortSignal;\n}',
   },
   {
     name: 'WorkflowStopReason',
     declaration: 'export type WorkflowStopReason = \'completed\' | \'cancelled\' | \'error\';',
+  },
+  {
+    name: 'WorkflowValidation',
+    declaration: 'export type WorkflowValidation = {\n    readonly ok: true;\n    readonly result?: unknown;\n} | {\n    readonly ok: false;\n    readonly error: string;\n};',
   },
 ]
 

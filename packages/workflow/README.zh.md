@@ -8,6 +8,9 @@
 |---|---|---|
 | [`workflow/`](workflow/README.md) | 定义工作流执行和生命周期事件 | `ctx.workflowEngine` |
 | [`workflow-worker-thread/`](workflow-worker-thread/README.md) | 在线程中运行工作流脚本 | 注册到 `ctx.workflowEngine` |
+| [`workflow-registry/`](workflow-registry/README.md) | 发现已保存 `.workflow.json` 定义 | `ctx.workflows` |
+| [`workflow-supervisor/`](workflow-supervisor/README.md) | 后台运行、显示名、journal 恢复 | `ctx.workflowSupervisor` |
+| [`command-workflows/`](command-workflows/README.md) | `/workflow`、`/workflows`、`/create-workflow`、`/<name>` | `ctx.commands` |
 | [`tool-workflow/`](tool-workflow/README.md) | 向模型公开通用工作流执行 | 注册到 `ctx.tools` |
 | [`tool-ralph/`](tool-ralph/README.md) | 公开使用全新 agent（智能体）的固定 Ralph 工作流 | 注册到 `ctx.tools` |
 

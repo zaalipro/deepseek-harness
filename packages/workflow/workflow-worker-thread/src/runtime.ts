@@ -21,6 +21,9 @@ import { isFatalWorkflowError, WorkflowError } from '@deepseek-ai/dsh-workflow'
 import type {
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
+  WorkflowGateInfo,
+  WorkflowGateKind,
+  WorkflowJournalEntry,
   WorkflowMeta,
   WorkflowResult,
 } from '@deepseek-ai/dsh-workflow'
@@ -33,6 +36,8 @@ export interface ExecutionObserver {
   log(message: string): void
   agentStart(info: WorkflowAgentInfo): void
   agentEnd(info: WorkflowAgentEndInfo): void
+  gate(gate: WorkflowGateInfo): void
+  agentResult(seq: number, result: unknown): void
 }
 
 /** The `agent()` options the script may pass; everything else rejects loud. */
@@ -62,13 +67,20 @@ function defaultLabel(prompt: string): string {
  * host owns cancellation and cleanup of any dropped child work.
  */
 export class WorkflowExecution {
-  /** 1-based count of `agent()` calls started (the `agentsStarted` result field). */
+  /** 1-based count of live `agent()` calls launched (the `agentsStarted` result field + budget spend). */
   private started = 0
+  /** 1-based count of every `agent()` invocation, journal-replayed or live (journal alignment). */
+  private callSeq = 0
   private activeSlots = 0
   private readonly slotWaiters: { resolve(): void; reject(error: unknown): void }[] = []
   private cancelReason: string | undefined
   private cancelError: WorkflowError | undefined
   private currentPhase: string | undefined
+  /** A `complete(value)` terminal, set before the sentinel throw. */
+  private completed: { value: unknown } | undefined
+  /** Resolver for the gate the script is currently parked on. */
+  private gateResume: (() => void) | undefined
+  private readonly journal: ReadonlyMap<number, WorkflowJournalEntry>
   private readonly context: vm.Context
   private readonly compiled: vm.Script
 
@@ -79,6 +91,8 @@ export class WorkflowExecution {
     private readonly limits: WorkerLimits,
     private readonly observer: ExecutionObserver,
     private readonly children: ChildPort,
+    journal: readonly WorkflowJournalEntry[] | undefined,
+    private readonly validateOnly = false,
   ) {
     // Compile FIRST: a body syntax error must throw out of the constructor
     // before any realm state exists. The host pre-parses the identical
@@ -95,14 +109,21 @@ export class WorkflowExecution {
       throw new WorkflowError(`workflow script does not parse: ${String(error)}`, 'SCRIPT_PARSE', { cause: error })
     }
 
+    this.journal = new Map((journal ?? []).map(entry => [entry.seq, entry]))
     this.context = vm.createContext({}, { name: `workflow:${meta.name}` })
 
     const globals: Record<string, unknown> = {
       agent: (prompt: unknown, opts?: unknown) => this.contain(this.agent(prompt, opts)),
-      parallel: (thunks: unknown) => this.contain(this.parallel(thunks)),
+      parallel: (items: unknown) => this.contain(this.parallel(items)),
       pipeline: (items: unknown, ...stages: unknown[]) => this.contain(this.pipeline(items, stages)),
       phase: (title: unknown) => { this.phase(title) },
       log: (message: unknown) => { this.log(message) },
+      complete: (value: unknown) => { this.complete(value) },
+      pause: (kind: unknown, message?: unknown) => this.contain(this.gate(kind, message, false)),
+      await_user: (kind: unknown, message?: unknown) => this.contain(this.gate(kind, message, true)),
+      budget: () => this.budget(),
+      write_scratch_file: (name: unknown, content: unknown) => this.contain(this.writeScratch(name, content)),
+      read_scratch_file: (name: unknown) => this.contain(this.readScratch(name)),
       // workerData already performed the real cross-thread structured clone.
       args,
     }
@@ -111,6 +132,11 @@ export class WorkflowExecution {
       // a script overwriting its own hooks only sabotages itself.
       ;(this.context as Record<string, unknown>)[key] = typeof value === 'function' ? Object.freeze(value) : value
     }
+  }
+
+  /** Release the gate the script is parked on, if any. */
+  resume(): void {
+    this.gateResume?.()
   }
 
   /**
@@ -167,6 +193,9 @@ export class WorkflowExecution {
       if (this.isCancelled()) throw this.cancelledError()
       const scriptPromise = this.compiled.runInContext(this.context, { timeout: this.limits.syncTimeoutMs }) as Promise<unknown>
       const raw: unknown = await this.contain(Promise.resolve(scriptPromise))
+      // `complete()` wins even when the script caught its sentinel and later
+      // returned another value.
+      if (this.completed !== undefined) return this.completedResult()
       // Cancelled while the body ran: a script that settled without touching
       // another hook (or without any) must still report `cancelled` — the
       // holder asked for cancellation and `completed` would be a lie.
@@ -174,16 +203,24 @@ export class WorkflowExecution {
       const value = raw === undefined ? null : this.materializeResult(raw)
       return { value, stopReason: 'completed', agentsStarted: this.started }
     } catch (error: unknown) {
+      if (this.completed !== undefined) return this.completedResult()
       // Any failure after cancel() reports `cancelled` with the canonical
       // reason — the reject path mirrors the resolve path's post-settle check.
       if (this.isCancelled()) {
         return { value: null, stopReason: 'cancelled', error: this.cancelledError().message, agentsStarted: this.started }
       }
+      if (error === COMPLETE_SENTINEL) return this.completedResult()
       // renderThrown is total (thrown values of any realm), so this arm
       // cannot throw — drive() resolving is the `result` never-rejects contract
       // contract.
       return { value: null, stopReason: 'error', error: renderThrown(error), agentsStarted: this.started }
     }
+  }
+
+  /** Materialize and report the `complete(value)` terminal. */
+  private completedResult(): WorkflowResult {
+    const value = this.completed === undefined ? null : this.materializeResult(this.completed.value)
+    return { value, stopReason: 'completed', agentsStarted: this.started }
   }
 
   /**
@@ -253,6 +290,15 @@ export class WorkflowExecution {
       throw new WorkflowError('agent() requires a non-empty prompt string', 'INVALID_ARGUMENT')
     }
     const opts = this.readAgentOptions(rawOpts)
+    this.callSeq += 1
+    const callSeq = this.callSeq
+    // Journal replay: a committed result from the original run returns without
+    // spending budget or launching a child (schema-correction and journal
+    // replays are free by contract).
+    const replay = this.journal.get(callSeq)
+    if (replay !== undefined) return replay.result
+    // Smoke-check mode: canned success instead of launching a child.
+    if (this.validateOnly) return opts.schema !== undefined ? {} : ''
     if (this.started >= this.limits.maxTotalAgents) {
       throw new WorkflowError(
         `this run reached its total agent cap (${this.limits.maxTotalAgents}) — a runaway-loop backstop; raise the applicable maxTotalAgents limit if the scale is intentional`,
@@ -320,13 +366,17 @@ export class WorkflowExecution {
             // a completed run without a structured value is a child failure.
             if (result.structured === undefined) {
               this.observer.agentEnd({ ...info, outcome: 'failed' })
+              this.observer.agentResult(callSeq, null)
               return null
             }
             this.observer.agentEnd({ ...info, outcome: 'completed' })
+            this.observer.agentResult(callSeq, result.structured)
             return result.structured
           }
+          const text = outputText(result.output)
           this.observer.agentEnd({ ...info, outcome: 'completed' })
-          return outputText(result.output)
+          this.observer.agentResult(callSeq, text)
+          return text
         }
         // A cancelled RUN kills the script; a child that failed for its own
         // reasons resolves null (scripts .filter(Boolean) per the CC contract).
@@ -335,6 +385,7 @@ export class WorkflowExecution {
           throw this.cancelledError()
         }
         this.observer.agentEnd({ ...info, outcome: 'failed' })
+        this.observer.agentResult(callSeq, null)
         return null
       } finally {
         await run.dispose()
@@ -397,19 +448,14 @@ export class WorkflowExecution {
     }
   }
 
-  /** The `parallel(thunks)` hook: each thunk caught → `null`; fatal errors propagate. */
-  private async parallel(rawThunks: unknown): Promise<unknown[]> {
+  /** The `parallel(items)` hook: thunks or job maps; each slot caught → `null`; fatal errors propagate. */
+  private async parallel(rawItems: unknown): Promise<unknown[]> {
     this.throwIfCancelled()
-    if (!Array.isArray(rawThunks)) {
-      throw new WorkflowError('parallel() requires an array of zero-argument functions', 'INVALID_ARGUMENT')
+    if (!Array.isArray(rawItems)) {
+      throw new WorkflowError('parallel() requires an array of zero-argument functions or job maps', 'INVALID_ARGUMENT')
     }
-    this.assertItemCap(rawThunks.length, 'parallel()')
-    const thunks = rawThunks.map((thunk, index) => {
-      if (typeof thunk !== 'function') {
-        throw new WorkflowError(`parallel() item ${index} is not a function`, 'INVALID_ARGUMENT')
-      }
-      return thunk as () => unknown
-    })
+    this.assertItemCap(rawItems.length, 'parallel()')
+    const thunks = rawItems.map((item, index) => this.jobThunk(item, index))
     return Promise.all(thunks.map(async (thunk) => {
       try {
         return await thunk()
@@ -422,6 +468,33 @@ export class WorkflowExecution {
         return null
       }
     }))
+  }
+
+  /** Accept one `parallel()` item as a zero-arg thunk or a Grok job map `{ prompt, ...opts }`. */
+  private jobThunk(item: unknown, index: number): () => unknown {
+    if (typeof item === 'function') return item as () => unknown
+    let job: unknown
+    try {
+      job = materializeFromRealm(item, `parallel() item ${index}`)
+    } catch (error: unknown) {
+      /* v8 ignore next -- defensive rethrow arm: materializeFromRealm only throws MaterializeError */
+      if (!(error instanceof MaterializeError)) throw error
+      throw new WorkflowError(`parallel() item ${index} must be a function or plain job map — ${error.message}`, 'INVALID_ARGUMENT', { cause: error })
+    }
+    if (typeof job !== 'object' || job === null || Array.isArray(job)) {
+      throw new WorkflowError(`parallel() item ${index} is not a function or job map`, 'INVALID_ARGUMENT')
+    }
+    const record = job as Record<string, unknown>
+    const prompt = record.prompt
+    if (typeof prompt !== 'string' || prompt.length === 0) {
+      throw new WorkflowError(`parallel() job ${index} requires a non-empty "prompt" string`, 'INVALID_ARGUMENT')
+    }
+    const opts: Record<string, unknown> = {}
+    for (const key of Object.keys(record)) {
+      if (key === 'prompt') continue
+      opts[key] = record[key]
+    }
+    return () => this.agent(prompt, opts)
   }
 
   /** The `pipeline(items, ...stages)` hook: per-item stage chains, NO cross-stage barrier. */
@@ -484,4 +557,98 @@ export class WorkflowExecution {
     }
     this.observer.log(message)
   }
+
+  /** The `complete(value)` hook: terminate the run successfully with a JSON value. */
+  private complete(value: unknown): never {
+    this.throwIfCancelled()
+    // The sentinel is recognized by drive() on every path — the script may
+    // catch the throw, but drive() still reports the completed value.
+    this.completed = { value }
+    throw COMPLETE_SENTINEL
+  }
+
+  /** The `budget()` hook: this run's logical agent budget and its spend. */
+  private budget(): { total: number; spent: number; reserved: 0; remaining: number } {
+    this.throwIfCancelled()
+    const total = this.limits.maxTotalAgents
+    const spent = this.started
+    return { total, spent, reserved: 0, remaining: total - spent }
+  }
+
+  /** The `pause()`/`await_user()` gate: park the run until a resume message releases it. */
+  private async gate(rawKind: unknown, rawMessage: unknown, resumable: boolean): Promise<void> {
+    this.throwIfCancelled()
+    if (typeof rawKind !== 'string' || rawKind.length === 0) {
+      throw new WorkflowError(`${resumable ? 'await_user' : 'pause'}() requires a non-empty kind string`, 'INVALID_ARGUMENT')
+    }
+    const kind = this.readGateKind(rawKind, resumable)
+    const message = rawMessage === undefined ? '' : typeof rawMessage === 'string' ? rawMessage : undefined
+    if (message === undefined) {
+      throw new WorkflowError(`${resumable ? 'await_user' : 'pause'}() message must be a string`, 'INVALID_ARGUMENT')
+    }
+    if (this.validateOnly) {
+      // Smoke-check mode: a gate is a successful stop, not a hang — narrate it
+      // and continue past so the single canned-host path still settles.
+      this.observer.log(`would ${resumable ? 'await_user' : 'pause'} (${kind}): ${message}`)
+      return
+    }
+    while (true) {
+      this.throwIfCancelled()
+      const gate: WorkflowGateInfo = { kind, message, resumable }
+      this.observer.gate(gate)
+      await new Promise<void>((resolve) => { this.gateResume = resolve })
+      this.gateResume = undefined
+      // `pause` (non-resumable) re-fires the gate; `await_user` continues past it.
+      if (resumable) return
+    }
+  }
+
+  /** Normalize a gate kind with its `backoff`/`blocked` aliases. */
+  private readGateKind(rawKind: string, resumable: boolean): WorkflowGateKind {
+    switch (rawKind) {
+      case 'user':
+      case 'back_off':
+      case 'backoff':
+      case 'no_progress':
+      case 'verification':
+      case 'blocked':
+      case 'infra':
+        break
+      default:
+        throw new WorkflowError(`${resumable ? 'await_user' : 'pause'}() kind "${rawKind}" is not recognized (user, back_off, no_progress, verification, infra)`, 'INVALID_ARGUMENT')
+    }
+    const normalized = rawKind === 'backoff' ? 'back_off' : rawKind === 'blocked' ? 'verification' : rawKind
+    return normalized as WorkflowGateKind
+  }
+
+  /** The `write_scratch_file(name, content)` hook: write one single-component scratch file. */
+  private async writeScratch(rawName: unknown, rawContent: unknown): Promise<void> {
+    this.throwIfCancelled()
+    const name = this.readScratchName(rawName)
+    if (typeof rawContent !== 'string') {
+      throw new WorkflowError('write_scratch_file() content must be a string', 'INVALID_ARGUMENT')
+    }
+    await this.children.writeScratch(name, rawContent)
+  }
+
+  /** The `read_scratch_file(name)` hook: read one single-component scratch file. */
+  private async readScratch(rawName: unknown): Promise<string | undefined> {
+    this.throwIfCancelled()
+    const name = this.readScratchName(rawName)
+    return this.children.readScratch(name)
+  }
+
+  /** Validate a single-component scratch file name (no separators or traversal). */
+  private readScratchName(rawName: unknown): string {
+    if (typeof rawName !== 'string' || !SCRATCH_NAME.test(rawName)) {
+      throw new WorkflowError('scratch file name must be a single component (letters, digits, . _ -)', 'INVALID_ARGUMENT')
+    }
+    return rawName
+  }
 }
+
+/** Single-component scratch file name grammar. */
+const SCRATCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** Sentinel thrown by `complete()`; drive() recognizes it to terminate successfully. */
+const COMPLETE_SENTINEL = { __workflowComplete: true }

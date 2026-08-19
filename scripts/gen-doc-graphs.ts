@@ -531,6 +531,22 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'One engine per context, as in bash, with no named-provider registry; the general workflow and fixed Ralph consumers start runs whose agent() calls fan out through ctx.subagents.',
   },
   {
+    key: 'workflows',
+    pkg: 'workflow-registry',
+    title: 'Saved-workflow definition registry',
+    mode: 'core',
+    consumers: ['command-workflows', 'tool-workflow', 'workflow-supervisor'],
+    note: 'Discovers and validates .workflow.json envelopes by meta.name with bundled > project > user precedence; watchers invalidate and emit workflows/change.',
+  },
+  {
+    key: 'workflowSupervisor',
+    pkg: 'workflow-supervisor',
+    title: 'Workflow run supervisor',
+    mode: 'core',
+    consumers: ['command-workflows', 'tool-workflow'],
+    note: 'Owns live WorkflowRun handles: session display names, background launch, journal pause/resume, stop/save, and session/workflow-runs frames.',
+  },
+  {
     key: 'lsp',
     pkg: 'lsp',
     title: 'Language-server navigation seam',

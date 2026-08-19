@@ -4,7 +4,7 @@
 
 import type {
   IApiClient, HostFrame, MuxFrame, RpcError, RpcRequest, RpcResult, SessionId,
-  SessionSummary, SubagentAddress, SubagentCatalog, JobView, WorkspaceId,
+  SessionSummary, SubagentAddress, SubagentCatalog, JobView, WorkflowRunView, WorkspaceId,
 } from '@deepseek-ai/dsh-api-remotes/client'
 // Value import from the inline-safe wire layer (not the connection plugin):
 // plugin-to-plugin value imports are a bundle purity error.
@@ -51,6 +51,8 @@ export interface SessionListSnapshot {
   subagentsByParent: Readonly<Record<SessionId, SubagentCatalogSnapshot>>
   /** Background jobs per session; an absent key is an empty set. */
   jobsBySession: Readonly<Record<SessionId, readonly JobView[]>>
+  /** Supervised workflow runs per session; an absent key is an empty set. */
+  workflowRunsBySession: Readonly<Record<SessionId, readonly WorkflowRunView[]>>
   currentAddress: SubagentAddress | undefined
 }
 
@@ -147,6 +149,8 @@ export class SessionManager {
    * is stored as an absent key, so absence and `[]` are one representation.
    */
   private readonly jobsBySession = new Map<SessionId, readonly JobView[]>()
+
+  private readonly workflowRunsBySession = new Map<SessionId, readonly WorkflowRunView[]>()
 
   private selected: SessionId | undefined
 
@@ -711,6 +715,12 @@ export class SessionManager {
       this.notifier.markDirty()
       return
     }
+    if (frame.type === 'session/workflow-runs') {
+      if (frame.runs.length === 0) this.workflowRunsBySession.delete(frame.sessionId)
+      else this.workflowRunsBySession.set(frame.sessionId, frame.runs)
+      this.notifier.markDirty()
+      return
+    }
     if (frame.type === 'session/subscribed') {
       // Rows past the host's durable baseline rode state a restart lost; drop
       // them so last-wins cannot pin a phantom value over recomputed truth.
@@ -719,6 +729,7 @@ export class SessionManager {
       // task baseline only when the set is non-empty, so a mirror kept from the
       // previous generation would survive as a phantom list.
       this.jobsBySession.delete(frame.sessionId)
+      this.workflowRunsBySession.delete(frame.sessionId)
       this.notifier.markDirty()
       // New mux-generation baseline: discard the previous queue snapshot.
       // The host omits session/queue when the live queue is empty, so retaining
@@ -834,6 +845,7 @@ export class SessionManager {
         // no relative order. Clearing here makes a detached Activation's rows
         // disappear whichever arrives first.
         this.jobsBySession.delete(frame.sessionId)
+        this.workflowRunsBySession.delete(frame.sessionId)
         if (!durableSubagent) this.projectionStores.delete(frame.sessionId)
         // A pull already in flight was requested before this removal and can
         // carry the pre-removal parentAvailable:true, which would resurrect
@@ -1071,6 +1083,7 @@ export class SessionManager {
       error: this.listError,
       subagentsByParent: Object.fromEntries(this.catalogs),
       jobsBySession: Object.fromEntries(this.jobsBySession),
+      workflowRunsBySession: Object.fromEntries(this.workflowRunsBySession),
       currentAddress: current === undefined ? undefined : this.addresses.get(current),
     }
   }

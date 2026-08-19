@@ -6,7 +6,9 @@
  * @module @deepseek-ai/dsh-workflow-worker-thread/host
  */
 
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type { WorkerOptions } from 'node:worker_threads'
 import { fileURLToPath } from 'node:url'
@@ -22,6 +24,9 @@ import type { ExecutionObserver } from './runtime.ts'
 import { HostToWorkerType, WorkerToHostType } from './protocol.ts'
 import type { HostToWorkerPayloads, WorkerToHostMessage } from './protocol.ts'
 import type { ChildResult, ChildStartRequest, WorkerInit } from './types.ts'
+
+/** Single-component scratch file name grammar (mirrors the worker-side validation). */
+const SCRATCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
 /** One published child and its shared quiescent-disposal transaction. */
 interface ChildRecord {
@@ -140,6 +145,7 @@ export class WorkerRun implements WorkflowRun {
     private readonly disposeGraceMs: number,
     private readonly observer: ExecutionObserver,
     signal: AbortSignal | undefined,
+    private readonly scratchDir: string | undefined,
   ) {
     this.result = new Promise<WorkflowResult>((resolve) => { this.settleResolve = resolve })
     // workerData rides the structured clone: args are plain JSON by the seam
@@ -201,6 +207,15 @@ export class WorkerRun implements WorkflowRun {
     }, this.disposeGraceMs)
     // unref'd: an armed grace timer must never hold the process open.
     this.graceTimer.unref()
+  }
+
+  /**
+   * Release a parked script gate. A no-op once the run settled or a cancel is
+   * already in flight (the cancel path owns the terminal state then).
+   */
+  resume(): void {
+    if (this.settled || this.terminalClaimed || this.cancelReason !== undefined) return
+    this.post(HostToWorkerType.Resume, {})
   }
 
   /**
@@ -296,6 +311,18 @@ export class WorkerRun implements WorkflowRun {
         // paths' synthesis) is what makes the one-pair-per-started-child
         // contract hold on every stop path.
         this.endAgent(message.info)
+        break
+      case WorkerToHostType.Gate:
+        if (this.cancelReason === undefined) this.observer.gate(message.gate)
+        break
+      case WorkerToHostType.AgentResult:
+        this.observer.agentResult(message.seq, message.result)
+        break
+      case WorkerToHostType.ScratchWrite:
+        void this.onScratchWrite(message.callId, message.name, message.content)
+        break
+      case WorkerToHostType.ScratchRead:
+        void this.onScratchRead(message.callId, message.name)
         break
       case WorkerToHostType.ChildStart:
         this.onChildStart(message.callId, message.request)
@@ -513,6 +540,42 @@ export class WorkerRun implements WorkflowRun {
       return
     }
     this.settleResult(result)
+  }
+
+  /** Serve one scratch write; a missing scratch directory reads as a contained failure. */
+  private async onScratchWrite(callId: number, name: string, content: string): Promise<void> {
+    if (this.scratchDir === undefined || !SCRATCH_NAME.test(name)) {
+      this.post(HostToWorkerType.ScratchWritten, { callId })
+      return
+    }
+    try {
+      await mkdir(join(this.scratchDir, 'scratch'), { recursive: true })
+      await writeFile(join(this.scratchDir, 'scratch', name), content, 'utf8')
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`workflow scratch write failed: ${renderThrown(error)}`)
+    } finally {
+      this.post(HostToWorkerType.ScratchWritten, { callId })
+    }
+  }
+
+  /** Serve one scratch read; absent files resolve with no content. */
+  private async onScratchRead(callId: number, name: string): Promise<void> {
+    if (this.scratchDir === undefined || !SCRATCH_NAME.test(name)) {
+      this.post(HostToWorkerType.ScratchReadResult, { callId })
+      return
+    }
+    try {
+      const content = await readFile(join(this.scratchDir, 'scratch', name), 'utf8')
+      this.post(HostToWorkerType.ScratchReadResult, { callId, content })
+    } catch (error: unknown) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') {
+        this.post(HostToWorkerType.ScratchReadResult, { callId })
+        return
+      }
+      this.ctx.logger.warn(`workflow scratch read failed: ${renderThrown(error)}`)
+      this.post(HostToWorkerType.ScratchReadResult, { callId })
+    }
   }
 
   /** Process an error/messageerror/exit signal; `exit` also performs the final disposal sweep. */

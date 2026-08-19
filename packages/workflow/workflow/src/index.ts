@@ -5,20 +5,25 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
-import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type {
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
+  WorkflowGateInfo,
   WorkflowResultInfo,
   WorkflowRunInfo,
 } from './types.ts'
 import type { WorkflowRun, WorkflowStartRequest } from './runtime-types.ts'
 
+export { WorkflowError, isFatalWorkflowError } from './error.ts'
+export type { WorkflowErrorCode } from './error.ts'
+export { validateMeta } from './meta.ts'
 export { WorkflowRunId } from './types.ts'
 export type {
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
   WorkflowAgentOutcome,
+  WorkflowGateInfo,
+  WorkflowGateKind,
   WorkflowMeta,
   WorkflowPhase,
   WorkflowResult,
@@ -26,7 +31,7 @@ export type {
   WorkflowRunInfo,
   WorkflowStopReason,
 } from './types.ts'
-export type { WorkflowRun, WorkflowStartRequest } from './runtime-types.ts'
+export type { WorkflowJournalEntry, WorkflowRun, WorkflowStartRequest } from './runtime-types.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -57,6 +62,15 @@ declare module '@deepseek-ai/cordis' {
      */
     'workflow/log'(info: WorkflowRunInfo, message: string): void
     /**
+     * The script parked the run on a human gate (a `pause()`/`await_user()`
+     * call). `resumable` distinguishes a gate resume passes (`await_user`)
+     * from one it re-fires (`pause`).
+     * @param info - the run's identity snapshot.
+     * @param gate - the gate kind, message, and resumability.
+     * @mode emit
+     */
+    'workflow/gate'(info: WorkflowRunInfo, gate: WorkflowGateInfo): void
+    /**
      * One `agent()` call established a published child run. Paired with
      * {@link Events['workflow/agent-end']} by `agent.seq`. A call that never
      * receives a published run from the provider emits neither
@@ -78,6 +92,16 @@ declare module '@deepseek-ai/cordis' {
      */
     'workflow/agent-end'(info: WorkflowRunInfo, agent: WorkflowAgentEndInfo): void
     /**
+     * One committed `agent()` result, in call order — the journal a same-process
+     * resume replays instead of relaunching the child. Emitted only for live
+     * calls (journal-replayed calls emit nothing).
+     * @param info - the run's identity snapshot.
+     * @param seq - the 1-based agent() call sequence the result commits to.
+     * @param result - the script-visible result (text, structured object, or `null`).
+     * @mode emit
+     */
+    'workflow/agent-result'(info: WorkflowRunInfo, seq: number, result: unknown): void
+    /**
      * A workflow run settled (any stop reason). Fired when
      * {@link WorkflowRun.result} resolves. Paired with
      * {@link Events['workflow/start']}.
@@ -95,57 +119,11 @@ export type WorkflowEventName =
   | 'workflow/start'
   | 'workflow/phase'
   | 'workflow/log'
+  | 'workflow/gate'
   | 'workflow/agent-start'
   | 'workflow/agent-end'
+  | 'workflow/agent-result'
   | 'workflow/end'
-
-/**
- * Machine-routable fatal workflow failures: parse/meta/argument/schema errors,
- * resource caps, subagent infrastructure failures, unserializable boundary
- * values, and cancellation. An ordinary child failure resolves its item to
- * `null` and is not one of these fatal codes.
- */
-export type WorkflowErrorCode =
-  | 'SCRIPT_PARSE'
-  | 'META_INVALID'
-  | 'INVALID_ARGUMENT'
-  | 'UNSUPPORTED_OPTION'
-  | 'UNSUPPORTED_SCHEMA'
-  | 'AGENT_CAP'
-  | 'ITEM_CAP'
-  | 'AGENT_START'
-  | 'AGENT_RESULT'
-  | 'RESULT_UNSERIALIZABLE'
-  | 'CANCELLED'
-
-/**
- * Typed error for workflow-seam failures. Extends {@link HarnessError}, so the
- * `code` is machine-routable taxonomy. `fatal` drives the combinator
- * discipline: `parallel()`/`pipeline()` re-throw a fatal error (a typo'd
- * option or a tripped cap must kill the script loudly), and reserve the
- * per-item `null` for child-run failures and ordinary in-stage script errors.
- * Every {@link WorkflowErrorCode} is fatal; the flag exists so the
- * distinction is explicit at every catch site rather than implied.
- */
-export class WorkflowError extends HarnessError {
-  /** Whether combinators must propagate this error instead of nulling the item. */
-  readonly fatal: boolean
-
-  constructor(message: string, code: WorkflowErrorCode, options?: ErrorOptions & { fatal?: boolean }) {
-    super(message, code, options)
-    this.name = 'WorkflowError'
-    this.fatal = options?.fatal ?? true
-  }
-}
-
-/**
- * Whether combinators must re-throw `error` instead of mapping the item to `null`.
- * @param error - any thrown value; fatality is host `instanceof` (unforgeable from a script realm).
- * @returns true iff `error` is a {@link WorkflowError} whose `fatal` flag is set.
- */
-export function isFatalWorkflowError(error: unknown): boolean {
-  return error instanceof WorkflowError && error.fatal
-}
 
 /**
  * Workflow Service Definition contract. Invalid requests throw before publication; a live

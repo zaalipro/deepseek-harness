@@ -68,6 +68,7 @@ class RpcChildHandle implements ChildHandle {
 class ChildRpcBridge implements ChildPort {
   private nextCallId = 0
   private readonly pending = new Map<number, PendingChild>()
+  private readonly pendingScratch = new Map<number, PromiseWithResolvers<{ content?: string }>>()
 
   constructor(private readonly post: Post) {}
 
@@ -87,6 +88,28 @@ class ChildRpcBridge implements ChildPort {
     this.post(WorkerToHostType.ChildStart, { callId, request })
     const childId = await entry.started.promise
     return new RpcChildHandle(this.post, callId, entry, childId)
+  }
+
+  async writeScratch(name: string, content: string): Promise<void> {
+    const callId = this.claimCallId()
+    const resolve = Promise.withResolvers<{ content?: string }>()
+    this.pendingScratch.set(callId, resolve)
+    this.post(WorkerToHostType.ScratchWrite, { callId, name, content })
+    await resolve.promise
+  }
+
+  async readScratch(name: string): Promise<string | undefined> {
+    const callId = this.claimCallId()
+    const resolve = Promise.withResolvers<{ content?: string }>()
+    this.pendingScratch.set(callId, resolve)
+    this.post(WorkerToHostType.ScratchRead, { callId, name })
+    const result = await resolve.promise
+    return result.content
+  }
+
+  private claimCallId(): number {
+    this.nextCallId += 1
+    return this.nextCallId
   }
 
   /** The host established a published child; releases the `startAgent` await. */
@@ -116,6 +139,20 @@ class ChildRpcBridge implements ChildPort {
     const entry = this.pending.get(callId)
     this.pending.delete(callId)
     entry?.disposed.resolve()
+  }
+
+  /** The host completed a scratch write. */
+  onScratchWritten(callId: number): void {
+    const entry = this.pendingScratch.get(callId)
+    this.pendingScratch.delete(callId)
+    entry?.resolve({})
+  }
+
+  /** The host completed a scratch read (content absent = file missing). */
+  onScratchReadResult(callId: number, content?: string): void {
+    const entry = this.pendingScratch.get(callId)
+    this.pendingScratch.delete(callId)
+    entry?.resolve({ ...content !== undefined ? { content } : {} })
   }
 }
 
@@ -151,11 +188,13 @@ export async function runWorkerSession(port: MessagePort, init: WorkerInit): Pro
     log: (message) => { post(WorkerToHostType.Log, { message }) },
     agentStart: (info) => { post(WorkerToHostType.AgentStart, { info }) },
     agentEnd: (info) => { post(WorkerToHostType.AgentEnd, { info }) },
+    gate: (gate) => { post(WorkerToHostType.Gate, { gate }) },
+    agentResult: (seq, result) => { post(WorkerToHostType.AgentResult, { seq, result }) },
   }
 
   let execution: WorkflowExecution
   try {
-    execution = new WorkflowExecution(init.meta, init.body, init.args, init.limits, observer, children)
+    execution = new WorkflowExecution(init.meta, init.body, init.args, init.limits, observer, children, init.journal, init.validateOnly)
   } catch (error: unknown) {
     post(WorkerToHostType.Result, { result: { value: null, stopReason: 'error', error: renderThrown(error), agentsStarted: 0 } })
     return
@@ -173,6 +212,9 @@ export async function runWorkerSession(port: MessagePort, init: WorkerInit): Pro
         // state before running the body, so the script never executes.
         gate.resolve()
         break
+      case HostToWorkerType.Resume:
+        execution.resume()
+        break
       case HostToWorkerType.ChildStarted:
         children.onChildStarted(message.callId, message.childId)
         break
@@ -187,6 +229,12 @@ export async function runWorkerSession(port: MessagePort, init: WorkerInit): Pro
         break
       case HostToWorkerType.ChildDisposed:
         children.onChildDisposed(message.callId)
+        break
+      case HostToWorkerType.ScratchWritten:
+        children.onScratchWritten(message.callId)
+        break
+      case HostToWorkerType.ScratchReadResult:
+        children.onScratchReadResult(message.callId, message.content)
         break
       /* v8 ignore next 2 -- closed engine-owned union; the arm only makes adding a message type a compile error */
       default:

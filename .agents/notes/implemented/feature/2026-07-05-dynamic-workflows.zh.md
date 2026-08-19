@@ -56,11 +56,9 @@ worker 侧逻辑通过进程内 `MessageChannel` 运行，使 V8 覆盖率能够
 
 ## 延迟（明确的非目标）
 
-- **后台收集**（启动工具 → run id → 完成通知 → 收集），与 shell/subagent 后台统一一起设计。
-- **日志化 + 恢复**（`resumeFromRunId`、缓存的 agent() 前缀）：实现它会以脚本约定收紧的形式重新引入 CC 的确定性禁令（脚本目前可以读取时钟）。
-- **保存／打包的工作流**（`.deepseek/workflows/` 注册表、斜杠命令 API）和**脚本持久化到运行目录**（工具调用事件已经持久记录了脚本）。
-- **嵌套 `workflow()`**、**token `budget`**，以及 `effort`/`isolation`/`agentType` agent 选项（每个都会明确拒绝，并在消息中注明其已延迟实现）。
-- **整体运行的挂钟超时**：取消总能释放调用方（result 在宽限期内 settle），因此总运行时间上限是后台重设计的策略旋钮，不是此处的正确性需求。
+- **跨进程恢复**——同进程暂停保留主机调用 journal，并以原脚本/args/预算恢复；进程死亡把活动运行标记为 `Interrupted` 而非可恢复。见[已保存工作流与运行监督器](2026-08-17-saved-workflow-supervisor.md)。
+- **嵌套 `workflow()`**（Grok 同样禁止从工作流启动工作流；改为内联）以及 `effort`/`isolation`/`agentType` agent 选项（每个都会明确拒绝，并在消息中注明其已延迟实现）。
+- **整体运行的挂钟超时**：取消总能释放调用方，因此总运行时间上限是策略旋钮，不是正确性需求。
 - **超越 worker 线程的引擎加固**：在同一 seam 背后使用 isolated-vm 或独立进程引擎（真正的沙箱化；内存限制）。
 - **ACP（Agent Client Protocol）后端结构化输出**和 **`toolFilter`**（两者仍以能力标志 `false` 门控）。
 

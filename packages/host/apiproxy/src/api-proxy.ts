@@ -62,6 +62,7 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 // Type-only: resolves `ctx.get('tasks')` to the background job registry.
 import type {} from '@deepseek-ai/dsh-jobs'
 import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
+import type {} from '@deepseek-ai/dsh-workflow-supervisor'
 // Type-only: resolves `ctx.get('sessionProjectionCache')` (the cold listing column).
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 // GoalError narrows domain rejections to their stable codes at the wire boundary.
@@ -3467,6 +3468,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }
           }
         }
+        // Workflow-run baseline, same posture as background tasks: whole-set
+        // snapshot per session, absent key means no runs.
+        const workflowSupervisor = ctx.get('workflowSupervisor')
+        if (workflowSupervisor !== undefined) {
+          for (const session of ctx.sessions.list()) {
+            const runs = workflowSupervisor.listRuns(ctx.agents.get(session.id))
+            if (runs.length > 0) {
+              queue.push(frame({ type: 'session/workflow-runs', sessionId: session.id, runs }))
+            }
+          }
+        }
         // Per-session open-call table for result-view pairing. Bounded by the
         // per-turn call count: entries clear on turn/end; a table miss (stream
         // opened mid-turn) backscans the session's in-memory events instead.
@@ -3502,6 +3514,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             if (views.length > 0) {
               queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
             }
+            if (workflowSupervisor !== undefined) {
+              const runs = workflowSupervisor.listRuns(ctx.agents.get(session.id))
+              if (runs.length > 0) {
+                queue.push(frame({ type: 'session/workflow-runs', sessionId: session.id, runs }))
+              }
+            }
           }),
           ctx.on('session/disposed', (session: Session) => {
             openCalls.delete(session.id)
@@ -3522,6 +3540,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 sessionId: session.id,
                 jobs: jobViews(jobs.list(ctx.agents.get(session.id))),
               }))
+            }
+          })],
+          ...workflowSupervisor === undefined ? [] : [ctx.on('workflows/run-change', () => {
+            for (const session of ctx.sessions.list()) {
+              const runs = workflowSupervisor.listRuns(ctx.agents.get(session.id))
+              queue.push(frame({ type: 'session/workflow-runs', sessionId: session.id, runs }))
             }
           })],
         ]

@@ -44,6 +44,8 @@
     "@deepseek-ai/dsh-system-prompt": "workspace:^",
     "@deepseek-ai/dsh-tools": "workspace:^",
     "@deepseek-ai/dsh-workflow": "workspace:^",
+    "@deepseek-ai/dsh-workflow-registry": "workspace:^",
+    "@deepseek-ai/dsh-workflow-supervisor": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   },
   "dependencies": {
@@ -58,6 +60,8 @@
     "@deepseek-ai/dsh-system-prompt": "workspace:^",
     "@deepseek-ai/dsh-tools": "workspace:^",
     "@deepseek-ai/dsh-workflow": "workspace:^",
+    "@deepseek-ai/dsh-workflow-registry": "workspace:^",
+    "@deepseek-ai/dsh-workflow-supervisor": "workspace:^",
     "@deepseek-ai/dsh-workflow-worker-thread": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   }

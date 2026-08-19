@@ -56,11 +56,9 @@ Worker-side logic runs through an in-process `MessageChannel` so V8 coverage mea
 
 ## Deferred (documented non-goals)
 
-- **Background collection** (start tool → run id → completion notice → collect), designed alongside shell/subagent background unification.
-- **Journaling + resume** (`resumeFromRunId`, cached agent() prefixes) — implementing it reintroduces CC's determinism bans as a script-contract tightening (scripts may read the clock today).
-- **Saved/bundled workflows** (a `.deepseek/workflows/` registry, slash-command API) and **script persistence to a run directory** (the tool-call event already records the script durably).
-- **Nested `workflow()`**, **token `budget`**, and the `effort`/`isolation`/`agentType` agent options (each rejects loud with a message naming it deferred).
-- **An overall run wall-clock timeout** — cancellation always frees the caller (result settles within the grace), so a cap on total run time is a policy knob for the background redesign, not a correctness need here.
+- **Cross-process resume** — a same-process pause retains a host-call journal and resumes the original script/args/budget; process death marks active runs `Interrupted` rather than resumable. See [saved workflows and the run supervisor](2026-08-17-saved-workflow-supervisor.md).
+- **Nested `workflow()`** (Grok also forbids launching workflows from workflows; inline instead) and the `effort`/`isolation`/`agentType` agent options (each rejects loud with a message naming it deferred).
+- **An overall run wall-clock timeout** — cancellation always frees the caller, so a cap on total run time is a policy knob, not a correctness need.
 - **Engine hardening beyond worker threads**: an isolated-vm or separate-process engine behind the same seam (actual sandboxing; memory limits).
 - **ACP-backend structured output** and **`toolFilter`** (both still capability-gated `false`).
 

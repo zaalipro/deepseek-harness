@@ -78,6 +78,9 @@
       "path": "../../jobs/jobs"
     },
     {
+      "path": "../../workflow/workflow-supervisor"
+    },
+    {
       "path": "../../interaction/commands"
     },
     {

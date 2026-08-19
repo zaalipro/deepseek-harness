@@ -36,6 +36,12 @@
       "path": "../workflow"
     },
     {
+      "path": "../workflow-registry"
+    },
+    {
+      "path": "../workflow-supervisor"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

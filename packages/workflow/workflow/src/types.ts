@@ -109,6 +109,22 @@ export interface WorkflowAgentInfo {
 /** How one `agent()` call settled: clean result, child failure (script sees `null`), or run cancellation. */
 export type WorkflowAgentOutcome = 'completed' | 'failed' | 'cancelled'
 
+/**
+ * Why a script parked a run on a human gate (`pause()`/`await_user()`). The
+ * kind is explanatory; `resumable` decides what resume does. CLOSED union.
+ */
+export type WorkflowGateKind = 'user' | 'back_off' | 'no_progress' | 'verification' | 'infra'
+
+/** One parked gate's snapshot (the `workflow/gate` payload). */
+export interface WorkflowGateInfo {
+  /** Explanatory gate kind. */
+  readonly kind: WorkflowGateKind
+  /** Human-readable reason the run needs input. */
+  readonly message: string
+  /** Whether resume continues past the gate (`await_user`, true) or re-fires it (`pause`, false). */
+  readonly resumable: boolean
+}
+
 /** One `agent()` call's settlement (the `workflow/agent-end` payload). */
 export interface WorkflowAgentEndInfo extends WorkflowAgentInfo {
   /** How the call settled. */

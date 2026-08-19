@@ -7,7 +7,7 @@
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
-import type { WorkflowMeta } from '@deepseek-ai/dsh-workflow'
+import type { WorkflowJournalEntry, WorkflowMeta } from '@deepseek-ai/dsh-workflow'
 
 /**
  * The per-run limits the worker-side runtime enforces. The host keeps the
@@ -34,6 +34,10 @@ export interface WorkerInit {
   args?: unknown
   /** The worker-enforced limits. */
   limits: WorkerLimits
+  /** Committed host-call results replayed instead of relaunching children; omitted for a fresh start. */
+  journal?: readonly WorkflowJournalEntry[]
+  /** Smoke-check mode: canned `agent()` results, no child RPC, no journal persistence. */
+  validateOnly?: boolean
 }
 
 /** What the worker asks the host to start for one `agent()` call (options already validated worker-side). */
@@ -91,4 +95,16 @@ export interface ChildPort {
    *   provider's asynchronous start fails.
    */
   startAgent(request: ChildStartRequest): Promise<ChildHandle>
+  /**
+   * Write one single-component scratch file into the run's scratch directory.
+   * @param name - single-component file name (no separators).
+   * @param content - full file content, written atomically.
+   */
+  writeScratch(name: string, content: string): Promise<void>
+  /**
+   * Read one single-component scratch file.
+   * @param name - single-component file name (no separators).
+   * @returns the file content, or `undefined` when absent.
+   */
+  readScratch(name: string): Promise<string | undefined>
 }

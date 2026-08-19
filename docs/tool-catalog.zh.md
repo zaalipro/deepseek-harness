@@ -39,7 +39,7 @@
 | `@deepseek-ai/dsh-tool-subagent-report` | `report` | `ctx.subagents`、`ctx.systemPrompt`、`a live continuable in-process child Agent` | `tool/call`、`tool/result`、`a user-role message in the direct parent session` | - | 按可继续的进程内子级注册，而非全局注册，因此该 schema 仅在这种子级内部可见，并且不受其全局 `toolFilter` 影响。同一份贡献还会安装子级作用域的 `tool:report` 系统提示词 section，本目录不渲染该 section。面向父级的 `send_message` 工具单独安装。 |
 | `@deepseek-ai/dsh-tool-jobs` | `job_kill`、`job_list`、`job_output` | `ctx.tools`、`ctx.jobs`、`ctx.systemPrompt` | `tool/call`、`tool/result`、`user/message via agent.inject() for background completion notices` | - | 与任务种类无关的后台任务控制器：后台 bash 命令、PTY 发送和 subagent 都通过相同的 3 个工具读取、列出和终止。加载该插件会挂接控制器，从而启用生产方的 `ctx.jobs.start()`。 |
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`、`owning Agent session` | `tool/call`、`todo/write`、`tool/result` | - | todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。 |
-| `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.workflowEngine`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result` | - | - |
+| `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.systemPrompt`、`ctx.workflowSupervisor`、`ctx.workflows`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`、`web_search` | `ctx.tools`、`ctx.web`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。 |
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
@@ -1737,34 +1737,49 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
 
 ## `@deepseek-ai/dsh-tool-workflow`
 
+
 ### `workflow`
 
 运行用于大规模编排 subagent 的 JavaScript 工作流脚本。当工作会分散到许多相互独立的部分时，请使用此工具，例如审查大量文件、执行迁移、开展多角度研究或对发现进行对抗式验证；此时应将编排写成脚本，而不是逐轮委派。
 
-工作流的身份通过 `meta` 参数以 JSON 形式传入：必填的 `name`（简短 kebab-case）和 `description` 字符串，以及可选的 `whenToUse` 字符串和 `phases` 数组（`{title, detail?, provider?, model?}`）。`script` 参数只能是纯 JavaScript **函数体**，不能是 TypeScript，也不能包含 `export const meta` 语句；meta 是参数而非代码。脚本支持顶层 await；请以 `return <value>` 结尾，该值必须可以 JSON 序列化，并作为此工具的结果。
+请提供**恰好一个**来源：`name`（位于 .dsh/workflows 中的已保存工作流）、`script`（内联纯 JS 脚本体，外加必填的 `meta` 对象）或 `script_path`（磁盘上的 .workflow.json 封套或脚本文件；裸文件需附带 `meta`）。
+
+工作流的身份通过 `meta` 参数以 JSON 形式传入：必填的 `name`（简短 kebab-case）和 `description` 字符串，以及可选的 `whenToUse` 字符串与 `phases` 数组（`{title, detail?, provider?, model?}`）。脚本只能是纯 JavaScript（不是 TypeScript，也不能包含 `export const meta` 语句；meta 是脚本之外的数据），支持顶层 await。
 
 脚本函数体提供以下钩子：
 
-- `agent(prompt, opts?): Promise<any>`：运行一个 subagent 直至完成。不提供 `opts.schema` 时，解析为子级最终文本；提供 `opts.schema` 时，它必须是以对象为根、且**只能**使用 type/properties/required/additionalProperties/items/enum/const/oneOf 的 JSON Schema，不支持 pattern/format/数值边界，此时解析为通过校验的对象。子级失败时解析为 `null`，可使用 `.filter(Boolean)` 过滤。其他选项包括 `label`（显示名称）、`phase`（进度组），以及相互独立的 `provider`／`model` LLM（大语言模型）目标覆盖项，两者可单独提供。其他任何选项（`effort`／`isolation`／`agentType`）都会明确报错。
-- `pipeline(items, ...stages): Promise<any[]>`：让每个条目分别经过各阶段，阶段之间**没有**屏障；多阶段工作优先使用它。每个阶段接收 `(prev, item, index)`。普通的阶段异常会将该**条目**变为 `null`，并跳过它的剩余阶段。
-- `parallel(thunks): Promise<any[]>`：并发运行零参数函数并等待**全部**完成。它会形成屏障，仅当某个阶段确实需要汇总全部先前结果时使用。抛出异常的 thunk 解析为 `null`。
+- `agent(prompt, opts?): Promise<any>`：运行一个 subagent 直至完成。不提供 `opts.schema` 时解析为子级最终文本；提供 `opts.schema`（以对象为根、且**只能**使用 type/properties/required/additionalProperties/items/enum/const/oneOf 的 JSON Schema——不支持 pattern/format/数值边界）时解析为通过校验的对象。子级失败时解析为 `null`（可用 `.filter(Boolean)` 过滤）。其他选项：`label`（显示名）、`phase`（进度组），以及相互独立的 `provider`／`model` LLM 目标覆盖项（两者可单独提供）。任何其他选项都会明确报错。
+- `parallel(items): Promise<any[]>`：并发运行零参数函数**或**作业映射 `{prompt, label?, phase?, schema?, provider?, model?}` 并等待**全部**完成（形成屏障）。失败的槽位解析为 `null`。
+- `pipeline(items, ...stages): Promise<any[]>`：让每个条目分别经过各阶段，阶段之间**没有**屏障。每个阶段接收 `(prev, item, index)`。
 - `phase(title)`：开始一个进度阶段；`log(message)`：说明进度；`args`：工具调用的 `args` 输入，原样提供。
+- `complete(value)`：以 JSON 值成功结束运行（用它替代 `return`）。
+- `await_user(kind, message)`：因等待人类回答而停放运行；恢复会越过它继续。`pause(kind, message)`：因恢复无法改变的条件而停放运行；恢复会重新触发它。kind 取值：user、back_off、no_progress、verification、infra。
+- `budget(): { total, spent, reserved, remaining }`：本次运行的逻辑 agent 预算。`write_scratch_file(name, content)`／`read_scratch_file(name)`：每次运行的暂存文件（单组件名称）。
 
 如果误用钩子（参数错误、未知选项、不受支持的 schema、触发上限），抛出的错误**总会**终止脚本，绝不会退化为单个条目的 `null`。
 
-约束：并发上限和 agent 总数上限均会生效；不提供文件系统、网络、定时器或 Node.js API。具体工作由 agent 完成，脚本只负责编排。该运行在前台执行：整个脚本完成后，调用才会返回。
+启动是**后台**的：调用立即返回 `{ displayName, runId, script_path, status: "started" }`；监督器拥有该运行，并在其结束时把最终报告发到对话中。并发与总 agent 上限适用；脚本没有文件系统、网络、计时器或 Node.js API——agent 负责干活，脚本只负责协调。设置 `validate_only: true` 可在不启动子代理的情况下冒烟检查一条罐头主机路径。
+
 
 ```json
 {
   "type": "object",
   "properties": {
+    "name": {
+      "type": "string",
+      "description": "Saved workflow definition name to launch (one of name/script/script_path)."
+    },
     "script": {
       "type": "string",
-      "description": "The plain-JS workflow script body (top-level await allowed; NO `export const meta` statement; end with `return <json-value>`)."
+      "description": "The plain-JS workflow script body (top-level await allowed; NO `export const meta` statement). Requires `meta`."
+    },
+    "script_path": {
+      "type": "string",
+      "description": "A .workflow.json envelope or a bare script file on disk to launch. A bare file requires `meta`."
     },
     "meta": {
       "type": "object",
-      "description": "The workflow identity block (plain JSON — never code).",
+      "description": "The workflow identity block (plain JSON — never code); required with script or a bare script_path.",
       "additionalProperties": true,
       "properties": {
         "name": {
@@ -1818,12 +1833,20 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
       "type": "object",
       "description": "Optional JSON input exposed to the script as the `args` global (wrap a bare list as a field, e.g. {\"files\": [...]}).",
       "additionalProperties": true
+    },
+    "validate_only": {
+      "type": "boolean",
+      "description": "Smoke-check one canned-host path instead of starting a live run (no children, no run record)."
+    },
+    "resume_from_run_id": {
+      "type": "string",
+      "description": "Resume a same-process paused run by its run id; reject combining with name/script/script_path."
+    },
+    "agent_budget": {
+      "type": "integer",
+      "description": "Absolute logical-agent cap for this run (default 128, allowed 1–1024)."
     }
-  },
-  "required": [
-    "script",
-    "meta"
-  ]
+  }
 }
 ```
 

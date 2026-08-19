@@ -76,6 +76,8 @@
       "@deepseek-ai/dsh-llm/brand": ["./packages/llm/llm/src/brand.ts"],
       "@deepseek-ai/dsh-llm-retry/types": ["./packages/llm/llm-retry/src/types.ts"],
       "@deepseek-ai/dsh-workflow/types": ["./packages/workflow/workflow/src/types.ts"],
+      "@deepseek-ai/dsh-workflow-registry/types": ["./packages/workflow/workflow-registry/src/types.ts"],
+      "@deepseek-ai/dsh-workflow-supervisor/types": ["./packages/workflow/workflow-supervisor/src/types.ts"],
       "@deepseek-ai/dsh-tool-workflow/types": ["./packages/workflow/tool-workflow/src/types.ts"],
       "@deepseek-ai/dsh-llm/message": ["./packages/llm/llm/src/message.ts"],
       "@deepseek-ai/dsh-commands/brand": ["./packages/interaction/commands/src/brand.ts"],

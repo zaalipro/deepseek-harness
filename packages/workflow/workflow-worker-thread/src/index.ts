@@ -11,13 +11,12 @@ import { availableParallelism } from 'node:os'
 import * as vm from 'node:vm'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import WorkflowEngine, { WorkflowError, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
+import WorkflowEngine, { validateMeta, WorkflowError, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
 import { WorkerRun } from './host.ts'
-import { validateMeta } from './meta.ts'
 import type { WorkerInit, WorkerLimits } from './types.ts'
 
-export { validateMeta } from './meta.ts'
+export { validateMeta } from '@deepseek-ai/dsh-workflow'
 export { materializeFromRealm, MaterializeError } from './realm.ts'
 export type {
   ChildHandle,
@@ -159,6 +158,8 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
       meta,
       body: request.script,
       ...request.args !== undefined ? { args: request.args } : {},
+      ...request.journal !== undefined ? { journal: request.journal } : {},
+      ...request.validateOnly !== undefined ? { validateOnly: request.validateOnly } : {},
       limits,
     }
     // Capture the dependency while this service call is still traced through
@@ -183,8 +184,11 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
         log: (message) => { this.emitWorkflowEvent('workflow/log', info, message) },
         agentStart: (agent) => { this.emitWorkflowEvent('workflow/agent-start', info, agent) },
         agentEnd: (agent) => { this.emitWorkflowEvent('workflow/agent-end', info, agent) },
+        gate: (gate) => { this.emitWorkflowEvent('workflow/gate', info, gate) },
+        agentResult: (seq, result) => { this.emitWorkflowEvent('workflow/agent-result', info, seq, result) },
       },
       request.signal,
+      request.scratchDir,
     )
 
     this.emitWorkflowEvent('workflow/start', info)

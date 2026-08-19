@@ -185,6 +185,11 @@ flowchart LR
   svc_workflowEngine["ctx.workflowEngine<br/>Workflow script engine"]
   pkg_workflow_worker_thread["workflow-worker-thread"]
   pkg_tool_workflow["tool-workflow"]
+  pkg_workflow_registry["workflow-registry"]
+  svc_workflows["ctx.workflows<br/>Saved-workflow definition registry"]
+  pkg_command_workflows["command-workflows"]
+  pkg_workflow_supervisor["workflow-supervisor"]
+  svc_workflowSupervisor["ctx.workflowSupervisor<br/>Workflow run supervisor"]
   pkg_lsp["lsp"]
   svc_lsp["ctx.lsp<br/>Language-server navigation seam"]
   pkg_lsp_local["lsp-local"]
@@ -292,6 +297,8 @@ flowchart LR
   pkg_web_search_perplexity --> svc_web
   pkg_webserver --> svc_webServer
   pkg_workflow --> svc_workflowEngine
+  pkg_workflow_registry --> svc_workflows
+  pkg_workflow_supervisor --> svc_workflowSupervisor
   pkg_workflow_worker_thread --> svc_workflowEngine
   pkg_workspace --> svc_workspaceRegistry
   svc_agentDefaultModel --> pkg_headless
@@ -405,6 +412,11 @@ flowchart LR
   svc_webServer --> pkg_modules
   svc_workflowEngine --> pkg_tool_ralph
   svc_workflowEngine --> pkg_tool_workflow
+  svc_workflowSupervisor --> pkg_command_workflows
+  svc_workflowSupervisor --> pkg_tool_workflow
+  svc_workflows --> pkg_command_workflows
+  svc_workflows --> pkg_tool_workflow
+  svc_workflows --> pkg_workflow_supervisor
   svc_workspaceRegistry --> pkg_apiproxy
   svc_fs -. event gate .-> pkg_fs_observation_policy
 ```
@@ -463,6 +475,8 @@ flowchart LR
 | `ctx.webServer` | `core` | `webserver` | - | `connection`, `modules`, `hmr` | - | Plain node:http carrier: named-route registry, index transform taps, and the static dist fallback; web-transport plugins register their own routes. |
 | `ctx.clientModules` | `core` | `modules` | - | `hmr` | - | Composes the __DSH_BOOT__ entry graph from an incremental dsh.client scan, serves plugin bundles, and notifies rebuilt/graph-changed subscribers. |
 | `ctx.workflowEngine` | `seam` | [`workflow`](../packages/workflow/workflow) | [`workflow-worker-thread`](../packages/workflow/workflow-worker-thread) | [`tool-workflow`](../packages/workflow/tool-workflow), [`tool-ralph`](../packages/workflow/tool-ralph) | - | One engine per context, as in bash, with no named-provider registry; the general workflow and fixed Ralph consumers start runs whose agent() calls fan out through ctx.subagents. |
+| `ctx.workflows` | `core` | [`workflow-registry`](../packages/workflow/workflow-registry) | - | [`command-workflows`](../packages/workflow/command-workflows), [`tool-workflow`](../packages/workflow/tool-workflow), [`workflow-supervisor`](../packages/workflow/workflow-supervisor) | - | Discovers and validates .workflow.json envelopes by meta.name with bundled > project > user precedence; watchers invalidate and emit workflows/change. |
+| `ctx.workflowSupervisor` | `core` | [`workflow-supervisor`](../packages/workflow/workflow-supervisor) | - | [`command-workflows`](../packages/workflow/command-workflows), [`tool-workflow`](../packages/workflow/tool-workflow) | - | Owns live WorkflowRun handles: session display names, background launch, journal pause/resume, stop/save, and session/workflow-runs frames. |
 | `ctx.lsp` | `seam` | [`lsp`](../packages/lsp/lsp) | `lsp-local` | [`tool-lsp`](../packages/lsp/tool-lsp) | - | Provider registration and selection plus normalized query execution over exactly four operations; the seam offers no protocol escape hatch, so a backend translates into the normalized request and result. |
 | `ctx.apiProxy` | `core` | `apiproxy` | - | `connection` | - | The transport-agnostic host gateway face: it dispatches browser API calls, and each open host stream subscribes to the events it forwards rather than being pushed to through a broadcast verb. |
 | `ctx.dynamicCordisRunner` | `core` | [`cordis-host-runner`](../packages/extensions/cordis-host-runner) | - | [`tool-cordis`](../packages/extensions/tool-cordis) | - | Owns the in-memory definition registry, the vm sandbox for host halves, and the request-run round trip; browser pages reach the same service over the wire through its remote namespace. |

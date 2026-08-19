@@ -8,6 +8,9 @@ This family runs model-authored orchestration workflows over subagents and expos
 |---|---|---|
 | [`workflow/`](workflow/README.md) | Defines workflow execution and lifecycle events | `ctx.workflowEngine` |
 | [`workflow-worker-thread/`](workflow-worker-thread/README.md) | Runs workflow scripts in worker threads | registers on `ctx.workflowEngine` |
+| [`workflow-registry/`](workflow-registry/README.md) | Discovers saved `.workflow.json` definitions | `ctx.workflows` |
+| [`workflow-supervisor/`](workflow-supervisor/README.md) | Background runs, display names, journal resume | `ctx.workflowSupervisor` |
+| [`command-workflows/`](command-workflows/README.md) | `/workflow`, `/workflows`, `/create-workflow`, `/<name>` | `ctx.commands` |
 | [`tool-workflow/`](tool-workflow/README.md) | Exposes general workflow execution to the model | registers on `ctx.tools` |
 | [`tool-ralph/`](tool-ralph/README.md) | Exposes the fixed fresh-agent Ralph workflow | registers on `ctx.tools` |
 

@@ -522,7 +522,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
     pkg: '@deepseek-ai/dsh-tool-workflow',
     dir: 'tool-workflow',
     source: 'packages/workflow/tool-workflow/src/index.ts',
-    requires: ['ctx.tools', 'ctx.workflowEngine', 'ctx.systemPrompt', 'a calling Agent (exec.agent parents the script children)'],
+    requires: ['ctx.tools', 'ctx.systemPrompt', 'ctx.workflowSupervisor', 'ctx.workflows', 'a calling Agent (exec.agent parents the script children)'],
     writes: ['tool/call', 'tool/result'],
     async mount(ctx) {
       // The tool injects `workflows`; boot the vm engine over a scripted

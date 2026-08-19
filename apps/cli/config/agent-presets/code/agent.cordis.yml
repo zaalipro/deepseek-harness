@@ -169,14 +169,14 @@
 # registered once. This preset contributes the delegation TOOLS, which resolve
 # that host registry.
 #
-# `workflows` is different — nothing outside an agent reads it — so every row
-# that reaches it shares one entry-local realm here, and a consumer left
-# outside would resolve a host registry this preset does not populate.
+# The workflow ENGINE, definition registry, run supervisor, and /workflow
+# commands are all HOST-plane: the supervisor and commands read the engine
+# from outside any agent, so the "nothing outside an agent reads workflows"
+# premise that once scoped it per preset no longer holds. This preset only
+# contributes the model-facing tool over that host engine.
 - id: delegation
   name: cordis:group
   group: true
-  isolate:
-    workflowEngine: true
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
@@ -218,11 +218,6 @@
         toolName: subagent_claude_code
         enableRunInBackground: false
         maxDepth: provider-managed
-
-    - id: workflow-worker-thread
-      name: '@deepseek-ai/dsh-workflow-worker-thread'
-      config:
-        provider: spawn
 
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'

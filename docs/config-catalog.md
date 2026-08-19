@@ -465,6 +465,22 @@ export interface Config {
 
 Source: [`packages/code-runtime/code-runtime-worker-thread/src/index.ts:25`](../packages/code-runtime/code-runtime-worker-thread/src/index.ts)
 
+<a id="deepseek-aidsh-command-workflows"></a>
+
+## `@deepseek-ai/dsh-command-workflows`
+
+Requires: `commands` · `workflows` · `workflowSupervisor` · `skills`
+
+```ts config-catalog
+/** Plugin config (all optional). */
+export interface Config {
+  /** Whether commands register (default true). */
+  enabled?: boolean
+}
+```
+
+Source: [`packages/workflow/command-workflows/src/index.ts:34`](../packages/workflow/command-workflows/src/index.ts)
+
 <a id="deepseek-aidsh-compaction-basic"></a>
 
 ## `@deepseek-ai/dsh-compaction-basic`
@@ -2746,7 +2762,7 @@ Source: [`packages/web/tool-web/src/index.ts:37`](../packages/web/tool-web/src/i
 
 ## `@deepseek-ai/dsh-tool-workflow`
 
-Requires: `tools` · `workflowEngine` · `systemPrompt`
+Requires: `tools` · `systemPrompt`
 
 ```ts config-catalog
 /** Config: the model-facing tool name plus result rendering caps. */
@@ -2758,7 +2774,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/workflow/tool-workflow/src/index.ts:33`](../packages/workflow/tool-workflow/src/index.ts)
+Source: [`packages/workflow/tool-workflow/src/index.ts:46`](../packages/workflow/tool-workflow/src/index.ts)
 
 <a id="deepseek-aidsh-tools"></a>
 
@@ -2991,6 +3007,57 @@ export interface Config {
 
 Source: [`packages/web/web-search-perplexity/src/index.ts:32`](../packages/web/web-search-perplexity/src/index.ts)
 
+<a id="deepseek-aidsh-workflow-registry"></a>
+
+## `@deepseek-ai/dsh-workflow-registry`
+
+```ts config-catalog
+/** Plugin config (all optional — `static Config` supplies the defaults). */
+export interface Config {
+  /** Whether the registry serves any roots (default true). */
+  enabled?: boolean
+  /** Harness home whose `workflows/` child is the user root. */
+  dshHome?: string
+  /** Optional packaged/bundled workflows directory. */
+  bundledDir?: string
+  /** Whether chokidar watches the roots and invalidates the catalog (default true). */
+  watch?: boolean
+}
+```
+
+Source: [`packages/workflow/workflow-registry/src/index.ts:64`](../packages/workflow/workflow-registry/src/index.ts)
+
+<a id="deepseek-aidsh-workflow-supervisor"></a>
+
+## `@deepseek-ai/dsh-workflow-supervisor`
+
+Requires: `workflowEngine` · `workflows`
+
+```ts config-catalog
+/** Plugin config (all optional — `static Config` supplies the defaults). */
+export interface Config {
+  /** Whether the supervisor serves runs (default true). */
+  enabled?: boolean
+  /** Harness home under which run directories live. */
+  dshHome?: string
+  /** Default per-run logical agent budget (default 128). */
+  defaultAgentBudget?: number
+  /** Absolute per-run logical agent budget ceiling (default 1024). */
+  maxAgentBudget?: number
+  /** Base directory owning per-run scratch + script projections (default `<dshHome>/workflow-runs`). */
+  runsRoot?: string
+  /** Default save scope when the caller does not choose (default `project`). */
+  saveScope?: WorkflowSaveScope
+}
+
+/** Which scope a save writes into. */
+export type WorkflowSaveScope = Extract<WorkflowScope, 'project' | 'user'>
+```
+
+Depends on: `WorkflowScope` (`@deepseek-ai/dsh-workflow-registry/types`)
+
+Source: [`packages/workflow/workflow-supervisor/src/index.ts:68`](../packages/workflow/workflow-supervisor/src/index.ts)
+
 <a id="deepseek-aidsh-workflow-worker-thread"></a>
 
 ## `@deepseek-ai/dsh-workflow-worker-thread`
@@ -3019,7 +3086,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/workflow/workflow-worker-thread/src/index.ts:32`](../packages/workflow/workflow-worker-thread/src/index.ts)
+Source: [`packages/workflow/workflow-worker-thread/src/index.ts:31`](../packages/workflow/workflow-worker-thread/src/index.ts)
 
 ## Loadable plugins with no config
 
@@ -3059,6 +3126,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-ui-trajectory` ([`packages/client/ui-trajectory/src/index.ts`](../packages/client/ui-trajectory/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-user-questions` ([`packages/client/ui-user-questions/src/index.ts`](../packages/client/ui-user-questions/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-workflow-run` ([`packages/client/ui-workflow-run/src/index.ts`](../packages/client/ui-workflow-run/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-workflows` ([`packages/client/ui-workflows/src/index.ts`](../packages/client/ui-workflows/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-workspace` ([`packages/client/ui-workspace/src/index.ts`](../packages/client/ui-workspace/src/index.ts))
 - `@deepseek-ai/dsh-command-compact` — requires `commands` · `compaction` ([`packages/compaction/command-compact/src/index.ts`](../packages/compaction/command-compact/src/index.ts))
 - `@deepseek-ai/dsh-command-feedback` — requires `commands` ([`packages/feedback/command-feedback/src/index.ts`](../packages/feedback/command-feedback/src/index.ts))

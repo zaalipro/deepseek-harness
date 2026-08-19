@@ -37,7 +37,7 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-subagent-report` | `report` | `ctx.subagents`, `ctx.systemPrompt`, `a live continuable in-process child Agent` | `tool/call`, `tool/result`, `a user-role message in the direct parent session` | - | Registered per continuable in-process child rather than globally, so this schema is visible only inside such a child and survives its global `toolFilter`. The same contribution installs the child-scoped `tool:report` prompt section, which this catalog does not render. The parent-facing `send_message` tool is installed independently. |
 | `@deepseek-ai/dsh-tool-jobs` | `job_kill`, `job_list`, `job_output` | `ctx.tools`, `ctx.jobs`, `ctx.systemPrompt` | `tool/call`, `tool/result`, `user/message via agent.inject() for background completion notices` | - | The kind-agnostic background-job controller: background bash commands, PTY sends, and subagents are read, listed, and killed through the same three tools. Loading the plugin attaches the controller that arms producers' `ctx.jobs.start()`. |
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`, `owning Agent session` | `tool/call`, `todo/write`, `tool/result` | - | todo_write is session-owned state; UIs render the latest todo/write event as a checklist. `allowParallelInProgress` is required with no default, so the catalog states its choice: `true`, whose description invites several `in_progress` items. A deployment choosing `false` receives the same tool with a description asking for exactly one active task. |
-| `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`, `ctx.workflowEngine`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents the script children)` | `tool/call`, `tool/result` | - | - |
+| `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`, `ctx.systemPrompt`, `ctx.workflowSupervisor`, `ctx.workflows`, `a calling Agent (exec.agent parents the script children)` | `tool/call`, `tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`, `web_search` | `ctx.tools`, `ctx.web`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps. |
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
@@ -1737,29 +1737,42 @@ todo_write is session-owned state; UIs render the latest todo/write event as a c
 
 Run a JavaScript workflow script that orchestrates subagents at scale. Use this for work that fans out across many independent pieces — an audit over many files, a migration, multi-angle research, adversarial verification of findings — where you write the orchestration as a script instead of delegating turn by turn.
 
-The workflow's identity rides the `meta` parameter as JSON: required `name` (short kebab-case) and `description` strings, optional `whenToUse` string and `phases` array (`{title, detail?, provider?, model?}`). The `script` parameter is the plain JavaScript body ONLY (NOT TypeScript, and NO `export const meta` statement — meta is a parameter, not code), running with top-level await; end with `return <value>` — the value must be JSON-serializable and is this tool's result.
+Supply EXACTLY ONE source: `name` (a saved workflow in .dsh/workflows), `script` (an inline plain-JS body, plus the required `meta` object), or `script_path` (a .workflow.json envelope or a script file on disk, plus `meta` for a bare file).
+
+The workflow's identity rides `meta` as JSON: required `name` (short kebab-case) and `description` strings, optional `whenToUse` string and `phases` array (`{title, detail?, provider?, model?}`). The script body is plain JavaScript ONLY (NOT TypeScript, and NO `export const meta` statement — meta is data beside the body), running with top-level await.
 
 Script-body hooks:
-- `agent(prompt, opts?): Promise<any>` — run one subagent to completion. Without `opts.schema` it resolves to the child's final text; with `opts.schema` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf — no pattern/format/numeric bounds) it resolves to the validated object. Resolves `null` when the child fails (filter with `.filter(Boolean)`). Other opts: `label` (display), `phase` (progress group), and independent `provider`/`model` LLM target overrides (either may be provided alone). Anything else (`effort`/`isolation`/`agentType`) is rejected loudly.
-- `pipeline(items, ...stages): Promise<any[]>` — run each item through the stages independently with NO barrier between stages (prefer this for multi-stage work). Each stage receives `(prev, item, index)`. An ordinary stage throw drops that ITEM to `null` and skips its remaining stages.
-- `parallel(thunks): Promise<any[]>` — run zero-argument functions concurrently and await ALL of them (a barrier; use only when a stage genuinely needs every prior result together). A throwing thunk resolves to `null`.
+- `agent(prompt, opts?): Promise<any>` — run one subagent to completion. Without `opts.schema` it resolves to the child's final text; with `opts.schema` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf — no pattern/format/numeric bounds) it resolves to the validated object. Resolves `null` when the child fails (filter with `.filter(Boolean)`). Other opts: `label` (display), `phase` (progress group), and independent `provider`/`model` LLM target overrides (either may be provided alone). Anything else is rejected loudly.
+- `parallel(items): Promise<any[]>` — run zero-argument functions OR job maps `{prompt, label?, phase?, schema?, provider?, model?}` concurrently and await ALL (a barrier). Failed slots resolve to `null`.
+- `pipeline(items, ...stages): Promise<any[]>` — run each item through the stages independently with NO barrier between stages. Each stage receives `(prev, item, index)`.
 - `phase(title)` — start a progress phase; `log(message)` — narrate progress; `args` — the tool call's `args` input, verbatim.
+- `complete(value)` — end the run successfully with a JSON value (use this instead of `return`).
+- `await_user(kind, message)` — park the run for a human answer; resume continues past it. `pause(kind, message)` — park a run for a condition resume cannot change; resume re-fires it. Kinds: user, back_off, no_progress, verification, infra.
+- `budget(): { total, spent, reserved, remaining }` — this run's logical agent budget. `write_scratch_file(name, content)` / `read_scratch_file(name)` — per-run scratch storage (single-component names).
 
 Misused hooks (bad arguments, unknown options, unsupported schemas, tripped caps) throw errors that ALWAYS kill the script — they never dissolve into a per-item `null`.
 
-Constraints: concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided — the agents do the work, the script only coordinates them. The run executes in the foreground: this call returns when the whole script finishes.
+Launch is BACKGROUND: the call returns immediately with `{ displayName, runId, script_path, status: "started" }`; the supervisor owns the run and posts the final report to the conversation when it settles. Concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided to the script — the agents do the work, the script only coordinates them. Set `validate_only: true` to smoke-check one canned-host path without launching children.
 
 ```json
 {
   "type": "object",
   "properties": {
+    "name": {
+      "type": "string",
+      "description": "Saved workflow definition name to launch (one of name/script/script_path)."
+    },
     "script": {
       "type": "string",
-      "description": "The plain-JS workflow script body (top-level await allowed; NO `export const meta` statement; end with `return <json-value>`)."
+      "description": "The plain-JS workflow script body (top-level await allowed; NO `export const meta` statement). Requires `meta`."
+    },
+    "script_path": {
+      "type": "string",
+      "description": "A .workflow.json envelope or a bare script file on disk to launch. A bare file requires `meta`."
     },
     "meta": {
       "type": "object",
-      "description": "The workflow identity block (plain JSON — never code).",
+      "description": "The workflow identity block (plain JSON — never code); required with script or a bare script_path.",
       "additionalProperties": true,
       "properties": {
         "name": {
@@ -1813,12 +1826,20 @@ Constraints: concurrency and total-agent caps apply; no filesystem, network, tim
       "type": "object",
       "description": "Optional JSON input exposed to the script as the `args` global (wrap a bare list as a field, e.g. {\"files\": [...]}).",
       "additionalProperties": true
+    },
+    "validate_only": {
+      "type": "boolean",
+      "description": "Smoke-check one canned-host path instead of starting a live run (no children, no run record)."
+    },
+    "resume_from_run_id": {
+      "type": "string",
+      "description": "Resume a same-process paused run by its run id; reject combining with name/script/script_path."
+    },
+    "agent_budget": {
+      "type": "integer",
+      "description": "Absolute logical-agent cap for this run (default 128, allowed 1–1024)."
     }
-  },
-  "required": [
-    "script",
-    "meta"
-  ]
+  }
 }
 ```
 

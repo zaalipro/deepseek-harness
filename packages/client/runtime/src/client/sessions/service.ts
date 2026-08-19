@@ -16,7 +16,7 @@
  */
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type {
-  IApiClient, RpcError, RpcResult, SessionId, SubagentAddress, JobView, WorkspaceId,
+  IApiClient, RpcError, RpcResult, SessionId, SubagentAddress, JobView, WorkflowRunView, WorkspaceId,
 } from '@deepseek-ai/dsh-api-remotes/client'
 // Value import from the inline-safe wire layer (not the connection plugin):
 // plugin-to-plugin value imports are a bundle purity error.
@@ -93,6 +93,12 @@ export interface SessionListState {
    * for a session without tasks — so consumers read absence, never a sentinel.
    */
   jobsBySession: Readonly<Record<SessionId, readonly JobView[]>>
+  /**
+   * Supervised workflow runs each session can see, mirrored last-wins from
+   * `session/workflow-runs`. An absent key is an empty set; the runtime always
+   * supplies the map, but test consumers may omit it (read `?? []`).
+   */
+  workflowRunsBySession?: Readonly<Record<SessionId, readonly WorkflowRunView[]>>
   /** Current session's catalog-derived address, absent on ordinary navigation. */
   currentAddress: SubagentAddress | undefined
 }
@@ -301,7 +307,7 @@ export class SessionRuntime implements ISessions {
     )
     this.list = createSnapshotStore<SessionListState>({
       ids: [], byId: {}, current: undefined, phase: 'pending',
-      subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
+      subagentsByParent: {}, jobsBySession: {}, workflowRunsBySession: {}, currentAddress: undefined,
     })
     // The manager owns wire truth; the store is its projection. Manager
     // notifications are already microtask-batched.
@@ -659,7 +665,7 @@ export class SessionRuntime implements ISessions {
   /** Project the manager's list snapshot into the store (title derivation is display-only). */
   private projectList(): void {
     const {
-      items, current, phase, subagentsByParent, jobsBySession, currentAddress,
+      items, current, phase, subagentsByParent, jobsBySession, workflowRunsBySession, currentAddress,
     } = this.manager.getListSnapshot()
     const ids: SessionId[] = []
     const byId: Record<SessionId, SessionSummary> = {}
@@ -729,7 +735,7 @@ export class SessionRuntime implements ISessions {
         ...(currentAddress === undefined ? {} : { subagentAddress: currentAddress }),
       })
     }
-    this.list.set({ ids, byId, current, phase, subagentsByParent, jobsBySession, currentAddress })
+    this.list.set({ ids, byId, current, phase, subagentsByParent, jobsBySession, workflowRunsBySession, currentAddress })
     this.pruneScopes()
   }
 
