@@ -45,6 +45,14 @@ export interface ISessions {
    */
   openSubagent(address: SubagentAddress): void
   /**
+   * Refresh an expected direct-parent catalog and open its referenced child
+   * only when the current catalog proves a healthy one-shot relationship.
+   * @param parentSessionId - expected direct parent id.
+   * @param childSessionId - referenced child id.
+   * @returns whether the child was resolved and opened.
+   */
+  resolveAndOpenSubagent(parentSessionId: SessionId, childSessionId: SessionId): Promise<boolean>
+  /**
    * Resolve an already discovered direct-parent address without opening it.
    * @param id - possible addressed child id.
    * @returns the retained address, when present.

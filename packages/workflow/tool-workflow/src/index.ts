@@ -13,135 +13,69 @@
  * original immutable script, args, and budget.
  *
  * The generic tool card stays; the supervisor posts the completion notice and
- * this consumer still projects `tool-workflow/*` Session events for top-level
- * runs so the durable `workflow-run` Chat node keeps working.
+ * `ctx.workflowRunRecorder` projects explicitly top-level launches into the
+ * durable `workflow-run` Chat node.
  * @module @deepseek-ai/dsh-tool-workflow
  */
 
-import { readFile } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
+import { assertNever } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { JsonValue, Session, SessionEventMap } from '@deepseek-ai/dsh-session'
-import type { WorkflowMeta, WorkflowRunId, WorkflowStopReason } from '@deepseek-ai/dsh-workflow'
+import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { WorkflowMeta } from '@deepseek-ai/dsh-workflow'
 import { parseDefinitionFile } from '@deepseek-ai/dsh-workflow-registry'
 import type { WorkflowDefinition } from '@deepseek-ai/dsh-workflow-registry'
-import type {
-  ToolWorkflowAgentEndData, ToolWorkflowAgentStartData,
-  ToolWorkflowRunEndData, ToolWorkflowRunStartData,
-} from './types.ts'
+import { SupervisedWorkflowRunId } from '@deepseek-ai/dsh-workflow-supervisor'
+import { FsError } from '@deepseek-ai/dsh-fs'
+import type { SupervisedWorkflowRunId as LogicalRunId } from '@deepseek-ai/dsh-workflow-supervisor/types'
+// Declaration merge only: makes ctx.fs visible for session-world source reads.
+import type {} from '@deepseek-ai/dsh-fs'
 // Declaration merge only: makes ctx.systemPrompt visible for the section registration.
 import type {} from '@deepseek-ai/dsh-system-prompt'
+// Declaration merge only: makes ctx.workflowRunRecorder visible for root launch attribution.
+import type {} from '@deepseek-ai/dsh-workflow-run-recorder'
 // Declaration merge only: makes ctx.workflowSupervisor visible for the launch.
 import type {} from '@deepseek-ai/dsh-workflow-supervisor'
-// Declaration merge only: makes ctx.workflowSupervisor visible for the launch.
+// Declaration merge only: makes ctx.workflows visible for source discovery.
 import type {} from '@deepseek-ai/dsh-workflow-registry'
 
 export const name = 'tool-workflow'
-export const inject = ['tools', 'systemPrompt']
+export const inject = [
+  'tools',
+  'systemPrompt',
+  'workflowSupervisor',
+  'workflowRunRecorder',
+  'workflows',
+  'fs',
+]
 
-/** Config: the model-facing tool name plus result rendering caps. */
+/** Config: the model-facing tool name plus rendering and source-size limits. */
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
-  /** Rendered-result ceiling, in characters: a longer JSON value is truncated with a notice (default 50000). */
+  /** Rendered validate-only result ceiling in characters (default 50000). */
   maxResultChars?: number
+  /** Maximum UTF-8 bytes accepted from one inline script or `script_path` file (default 1048576). */
+  maxDefinitionBytes?: number
 }
 
 export const Config: z<Config> = z.object({
   toolName: z.string().default('workflow'),
   maxResultChars: z.natural().min(1).default(50_000),
+  maxDefinitionBytes: z.natural().min(1).default(1024 * 1024),
 })
 
 type ResolvedConfig = Required<Config>
 
-interface WorkflowRecorder {
-  start(session: Session, runId: WorkflowRunId, name: string): void
-  abandon(runId: WorkflowRunId): void
-}
-
-interface ToolWorkflowRecordEventMap {
-  'tool-workflow/run-start': ToolWorkflowRunStartData
-  'tool-workflow/agent-start': ToolWorkflowAgentStartData
-  'tool-workflow/agent-end': ToolWorkflowAgentEndData
-  'tool-workflow/run-end': ToolWorkflowRunEndData
-}
-
-/** Render a contained recording failure without trusting the thrown value. */
-function renderRecordingError(error: unknown): string {
-  try {
-    return String(error)
-  } catch {
-    return '[unrenderable thrown value]'
+/** Validate and brand one model-supplied logical workflow-run identity. */
+function parseSupervisedWorkflowRunId(value: string): LogicalRunId {
+  if (value.length === 0) {
+    throw new Error('workflow resume_from_run_id must be a non-empty string')
   }
-}
-
-/**
- * Project active top-level workflow runs into their parent Sessions without
- * letting recording failure affect tool execution. A background run now ends
- * through the `workflow/end` event, so the recorder owns finish on its own.
- */
-function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
-  const active = new Map<WorkflowRunId, Session>()
-  const append = <Type extends keyof ToolWorkflowRecordEventMap>(
-    session: Session,
-    type: Type,
-    data: SessionEventMap[Type],
-  ): boolean => {
-    // These four package-owned events are all log-only. Narrowing the generic
-    // append face here discharges Session.append's conditional options tuple.
-    const appendRecord = session.append.bind(session) as <Event extends keyof ToolWorkflowRecordEventMap>(
-      event: Event,
-      value: SessionEventMap[Event],
-    ) => void
-    try {
-      appendRecord(type, data)
-      return true
-    } catch (error: unknown) {
-      ctx.logger.warn(`tool-workflow: disabled durable record after ${type} append failed: ${renderRecordingError(error)}`)
-      return false
-    }
-  }
-  const finish = (runId: WorkflowRunId, stopReason: WorkflowStopReason): void => {
-    const session = active.get(runId)
-    if (session !== undefined) append(session, 'tool-workflow/run-end', { runId, stopReason })
-    active.delete(runId)
-  }
-
-  ctx.on('workflow/agent-start', (info, agent) => {
-    const session = active.get(info.id)
-    if (session === undefined) return
-    const data: ToolWorkflowAgentStartData = {
-      runId: info.id,
-      seq: agent.seq,
-      label: agent.label,
-      ...agent.phase === undefined ? {} : { phase: agent.phase },
-      childId: agent.childId,
-    }
-    if (!append(session, 'tool-workflow/agent-start', data)) active.delete(info.id)
-  })
-  ctx.on('workflow/agent-end', (info, agent) => {
-    const session = active.get(info.id)
-    if (session === undefined) return
-    const data: ToolWorkflowAgentEndData = {
-      runId: info.id,
-      seq: agent.seq,
-      outcome: agent.outcome,
-    }
-    if (!append(session, 'tool-workflow/agent-end', data)) active.delete(info.id)
-  })
-  ctx.on('workflow/end', (info, result) => { finish(info.id, result.stopReason) })
-
-  return {
-    start(session, runId, runName) {
-      if (append(session, 'tool-workflow/run-start', { runId, name: runName })) {
-        active.set(runId, session)
-      }
-    },
-    abandon: (runId) => { active.delete(runId) },
-  }
+  return SupervisedWorkflowRunId(value)
 }
 
 /**
@@ -156,7 +90,7 @@ Supply EXACTLY ONE source: \`name\` (a saved workflow in .dsh/workflows), \`scri
 The workflow's identity rides \`meta\` as JSON: required \`name\` (short kebab-case) and \`description\` strings, optional \`whenToUse\` string and \`phases\` array (\`{title, detail?, provider?, model?}\`). The script body is plain JavaScript ONLY (NOT TypeScript, and NO \`export const meta\` statement — meta is data beside the body), running with top-level await.
 
 Script-body hooks:
-- \`agent(prompt, opts?): Promise<any>\` — run one subagent to completion. Without \`opts.schema\` it resolves to the child's final text; with \`opts.schema\` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf — no pattern/format/numeric bounds) it resolves to the validated object. Resolves \`null\` when the child fails (filter with \`.filter(Boolean)\`). Other opts: \`label\` (display), \`phase\` (progress group), and independent \`provider\`/\`model\` LLM target overrides (either may be provided alone). Anything else is rejected loudly.
+- \`agent(prompt, opts?): Promise<any>\` — run one subagent to completion. Without \`opts.schema\` it resolves to the child's final text; with \`opts.schema\` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/minItems/maxItems/enum/const/oneOf — \`minItems\`/\`maxItems\` are array-only non-negative integer bounds; no pattern/format/numeric bounds) it resolves to the validated object. Resolves \`null\` when the child fails (filter with \`.filter(Boolean)\`). Other opts: \`label\` (display), \`phase\` (progress group), and independent \`provider\`/\`model\` LLM target overrides (either may be provided alone). Anything else is rejected loudly.
 - \`parallel(items): Promise<any[]>\` — run zero-argument functions OR job maps \`{prompt, label?, phase?, schema?, provider?, model?}\` concurrently and await ALL (a barrier). Failed slots resolve to \`null\`.
 - \`pipeline(items, ...stages): Promise<any[]>\` — run each item through the stages independently with NO barrier between stages. Each stage receives \`(prev, item, index)\`.
 - \`phase(title)\` — start a progress phase; \`log(message)\` — narrate progress; \`args\` — the tool call's \`args\` input, verbatim.
@@ -166,7 +100,7 @@ Script-body hooks:
 
 Misused hooks (bad arguments, unknown options, unsupported schemas, tripped caps) throw errors that ALWAYS kill the script — they never dissolve into a per-item \`null\`.
 
-Launch is BACKGROUND: the call returns immediately with \`{ displayName, runId, script_path, status: "started" }\`; the supervisor owns the run and posts the final report to the conversation when it settles. Concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided to the script — the agents do the work, the script only coordinates them. Set \`validate_only: true\` to smoke-check one canned-host path without launching children.`
+Launch is BACKGROUND: the call returns immediately with \`{ displayName, runId, script_path, status: "started" }\`; the supervisor owns the run and posts the final report to the conversation when it settles. Concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided to the script — the agents do the work, the script only coordinates them. Set \`validate_only: true\` to smoke-check one canned-host path without launching children. To resume a paused, needs-input, or budget-limited run, supply only \`resume_from_run_id\` and optionally a higher \`agent_budget\` for a budget-limited run.`
 
 type WorkflowCallArgs = {
   name?: string
@@ -200,6 +134,7 @@ function presentWorkflowResult(args: WorkflowCallArgs, result: { content: Conten
 async function resolveSource(
   ctx: Context,
   args: WorkflowCallArgs,
+  options: { cwd?: string; signal: AbortSignal; maxDefinitionBytes: number },
 ): Promise<{ definition?: WorkflowDefinition; script?: string; meta?: WorkflowMeta }> {
   const sources = [args.name, args.script, args.script_path].filter(source => source !== undefined)
   if (sources.length === 0) {
@@ -209,44 +144,105 @@ async function resolveSource(
     throw new Error('workflow accepts exactly ONE source: name, script, or script_path — not a combination')
   }
   if (args.name !== undefined) {
-    const cwd = process.cwd()
-    const workflows = ctx.get('workflows')
-    if (workflows === undefined) throw new Error('workflow registry is unavailable in this composition')
-    const definition = await workflows.get(args.name, { cwd })
+    if (args.meta !== undefined) throw new Error('workflow name source must not include meta; the saved definition owns it')
+    const definition = await ctx.workflows.get(args.name, {
+      ...options.cwd === undefined ? {} : { cwd: options.cwd },
+      signal: options.signal,
+    })
     if (definition === undefined) throw new Error(`no saved workflow named "${args.name}"`)
     return { definition }
   }
   if (args.script !== undefined) {
     if (args.meta === undefined) throw new Error('workflow script source requires the meta object')
+    if (new TextEncoder().encode(args.script).byteLength > options.maxDefinitionBytes) {
+      throw new Error(`workflow script exceeds the ${options.maxDefinitionBytes}-byte limit`)
+    }
     return { script: args.script, meta: args.meta }
   }
   // script_path: a .workflow.json envelope, or a bare script file with meta.
-  const raw = await readFile(args.script_path as string, 'utf8')
-  if ((args.script_path as string).endsWith('.workflow.json')) {
-    const baseName = (args.script_path as string).slice((args.script_path as string).lastIndexOf('/') + 1, -'.workflow.json'.length)
-    return { definition: { ...parseDefinitionFile(raw, args.script_path as string, baseName), scope: 'project' } }
+  const scriptPath = args.script_path as string
+  if (scriptPath.endsWith('.workflow.json')) {
+    if (args.meta !== undefined) throw new Error('workflow .workflow.json source must not include meta; the envelope owns it')
+    const raw = await readScriptPath(ctx, scriptPath, options)
+    const fileName = scriptPath.replaceAll('\\', '/').slice(scriptPath.replaceAll('\\', '/').lastIndexOf('/') + 1)
+    const baseName = fileName.slice(0, -'.workflow.json'.length)
+    return { definition: { ...parseDefinitionFile(raw, scriptPath, baseName), scope: 'project' } }
   }
   if (args.meta === undefined) throw new Error('workflow script_path to a bare script requires the meta object')
+  const raw = await readScriptPath(ctx, scriptPath, options)
   return { script: raw, meta: args.meta }
 }
 
-/** Render the launch/validate outcome for the tool result. */
-function renderLaunch(value: { status: string; displayName?: string; result?: JsonValue }, maxChars: number): string {
-  if (value.status === 'validated') {
-    const rendered = JSON.stringify(value.result ?? null, null, 2)
-    const clipped = rendered.length > maxChars ? `${rendered.slice(0, maxChars)}\n… [truncated]` : rendered
-    return `workflow smoke check passed.\nResult:\n${clipped}`
+/** Read one bounded regular UTF-8 file through the session filesystem without following its final symlink. */
+async function readScriptPath(
+  ctx: Context,
+  path: string,
+  options: { cwd?: string; signal: AbortSignal; maxDefinitionBytes: number },
+): Promise<string> {
+  let bytes: Uint8Array
+  try {
+    bytes = await ctx.fs.readBytesNoFollow(
+      path,
+      options.cwd === undefined ? {} : { cwd: options.cwd },
+      options.signal,
+      options.maxDefinitionBytes,
+    )
+  } catch (error: unknown) {
+    if (error instanceof FsError) {
+      switch (error.code) {
+        case 'FS_NOT_FOUND':
+          throw new Error(`workflow script_path "${path}" was not found`, { cause: error })
+        case 'FS_NOT_REGULAR_FILE':
+          throw new Error(
+            `workflow script_path "${path}" must be a regular file and must not be a symbolic link`,
+            { cause: error },
+          )
+        case 'FS_TOO_LARGE':
+          throw new Error(
+            `workflow script_path "${path}" exceeds the ${options.maxDefinitionBytes}-byte limit`,
+            { cause: error },
+          )
+        default:
+          throw error
+      }
+    }
+    throw error
   }
-  if (value.status === 'started') return `workflow "${value.displayName ?? ''}" started in the background. Watch it with /workflows.`
-  return `workflow "${value.displayName ?? ''}" resumed.`
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch (error) {
+    throw new Error(`workflow script_path "${path}" is not valid UTF-8`, { cause: error })
+  }
+}
+
+type WorkflowToolOutput =
+  | { status: 'started'; displayName: string; runId: string; script_path?: string }
+  | { status: 'resumed'; displayName: string; runId: string }
+  | { status: 'validated'; ok: true; result?: JsonValue }
+
+/** Render the launch/validate outcome for the tool result. */
+function renderLaunch(value: WorkflowToolOutput, maxChars: number): string {
+  switch (value.status) {
+    case 'validated': {
+      const rendered = JSON.stringify(value.result ?? null, null, 2)
+      const clipped = rendered.length > maxChars ? `${rendered.slice(0, maxChars)}\n… [truncated]` : rendered
+      return `workflow smoke check passed.\nResult:\n${clipped}`
+    }
+    case 'started':
+      return JSON.stringify(value)
+    case 'resumed':
+      return JSON.stringify(value)
+    default:
+      return assertNever(value, 'workflow tool output')
+  }
 }
 
 export function apply(ctx: Context, config: Config): void {
   // schemastery (the exported Config schema) has already filled the defaulted
   // fields; the assertion records that resolution, not a hidden fallback.
-  const { toolName, maxResultChars } = config as ResolvedConfig
-  const recorder = createWorkflowRecorder(ctx)
-  const supervisor = ctx.get('workflowSupervisor')
+  const { toolName, maxResultChars, maxDefinitionBytes } = config as ResolvedConfig
+  const recorder = ctx.workflowRunRecorder
+  const supervisor = ctx.workflowSupervisor
   // Usage policy ships with the tool (the master convention: tool guidance
   // lives in tool plugins as prompt sections, not in the deployment persona).
   ctx.systemPrompt.section({
@@ -272,7 +268,7 @@ export function apply(ctx: Context, config: Config): void {
       },
       meta: {
         type: 'object',
-        additionalProperties: true,
+        additionalProperties: false,
         description: 'The workflow identity block (plain JSON — never code); required with script or a bare script_path.',
         properties: {
           name: { type: 'string', required: true, description: 'Short kebab-case workflow name.' },
@@ -283,7 +279,7 @@ export function apply(ctx: Context, config: Config): void {
             description: 'Optional phase declarations matched by phase() calls.',
             items: {
               type: 'object',
-              additionalProperties: true,
+              additionalProperties: false,
               properties: {
                 title: { type: 'string', required: true, description: 'The phase title phase() calls match by exact string.' },
                 detail: { type: 'string', description: 'Optional one-line description of the phase.' },
@@ -314,23 +310,43 @@ export function apply(ctx: Context, config: Config): void {
     },
     output: {
       schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          status: { type: 'string', required: true },
-          displayName: { type: 'string' },
-          runId: { type: 'string' },
-          script_path: { type: 'string' },
-          ok: { type: 'boolean' },
-          result: { type: 'json' },
-        },
+        oneOf: [
+          {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              status: { type: 'string', const: 'started', required: true },
+              displayName: { type: 'string', required: true },
+              runId: { type: 'string', required: true },
+              script_path: { type: 'string' },
+            },
+          },
+          {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              status: { type: 'string', const: 'resumed', required: true },
+              displayName: { type: 'string', required: true },
+              runId: { type: 'string', required: true },
+            },
+          },
+          {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              status: { type: 'string', const: 'validated', required: true },
+              ok: { type: 'boolean', const: true, required: true },
+              result: { type: 'json' },
+            },
+          },
+        ],
       },
       render: (_args, value) => [{
         type: 'text',
-        text: renderLaunch(value as { status: string; displayName?: string; result?: JsonValue }, maxResultChars),
+        text: renderLaunch(value, maxResultChars),
       }],
     },
-    async execute(args, exec) {
+    async execute(args, exec): Promise<WorkflowToolOutput> {
       const parent = exec.agent
       if (!parent) {
         // The loop sets `exec.agent` for every model-driven call; its absence
@@ -338,39 +354,53 @@ export function apply(ctx: Context, config: Config): void {
         // parent to attribute the children to. Fail loud rather than guess.
         throw new Error('workflow tool requires a calling agent (exec.agent was undefined)')
       }
-      if (supervisor === undefined) throw new Error('workflow supervisor is unavailable in this composition')
-
       // Resume path: the original immutable script, args, and budget.
       if (args.resume_from_run_id !== undefined) {
-        if (args.name !== undefined || args.script !== undefined || args.script_path !== undefined) {
-          throw new Error('workflow resume_from_run_id cannot be combined with name, script, or script_path')
+        if (args.name !== undefined || args.script !== undefined || args.script_path !== undefined
+          || args.meta !== undefined || args.args !== undefined || args.validate_only !== undefined) {
+          throw new Error('workflow resume_from_run_id cannot be combined with a source, meta, args, or validate_only')
         }
-        const displayName = supervisor.resumeById(args.resume_from_run_id, parent)
-        return { status: 'resumed', displayName, runId: args.resume_from_run_id }
+        const runId = parseSupervisedWorkflowRunId(args.resume_from_run_id)
+        const displayName = supervisor.resumeById(runId, parent, args.agent_budget, exec.signal)
+        return { status: 'resumed', displayName, runId }
       }
 
-      const source = await resolveSource(ctx, args)
+      const source = await resolveSource(ctx, args, {
+        ...parent.session.header.cwd === undefined ? {} : { cwd: parent.session.header.cwd },
+        signal: exec.signal,
+        maxDefinitionBytes,
+      })
 
       // Smoke check: no live run, no destination record, no dashboard row.
       if (args.validate_only === true) {
         const validation = await supervisor.validate({
           ...source,
           ...args.args !== undefined ? { args: args.args } : {},
+          ...args.agent_budget !== undefined ? { agentBudget: args.agent_budget } : {},
+          signal: exec.signal,
           parent,
         })
         if (!validation.ok) throw new Error(validation.error)
-        return { status: 'validated', ok: true, result: validation.result as JsonValue }
+        return {
+          status: 'validated',
+          ok: true,
+          ...validation.result === undefined ? {} : { result: validation.result as JsonValue },
+        }
       }
 
-      const launched = await supervisor.start({
+      const start = () => supervisor.start({
         ...source,
         ...args.args !== undefined ? { args: args.args } : {},
         ...args.agent_budget !== undefined ? { agentBudget: args.agent_budget } : {},
+        signal: exec.signal,
         parent,
       })
-      // Project the top-level run into the parent Session for the durable
-      // workflow-run Chat node; nested transport calls write no record.
-      if (exec.parent === undefined) recorder.start(parent.session, launched.runId, source.meta?.name ?? source.definition?.name ?? '')
+      // Only root transport calls establish recorder attribution. The
+      // supervisor publishes logical lifecycle events during start and owns
+      // every later attempt, including pause/resume replays.
+      const launched = exec.parent === undefined
+        ? await recorder.launch(parent.session, start)
+        : await start()
       return {
         status: 'started',
         displayName: launched.displayName,

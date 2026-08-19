@@ -7,7 +7,8 @@
  */
 
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { JsonValue, SessionId } from '@deepseek-ai/dsh-session/types'
+import type { WorkflowErrorCode } from './error.ts'
 
 /** Identifies one workflow run. */
 export type WorkflowRunId = Branded<'WorkflowRunId'>
@@ -71,22 +72,23 @@ export type WorkflowStopReason = 'completed' | 'cancelled' | 'error'
  */
 export interface WorkflowResult {
   /** The script's return value (host JSON data; `null` for no return). */
-  value: unknown
+  value: JsonValue
   /** Why the run settled. */
   stopReason: WorkflowStopReason
   /** The failure message (present iff `stopReason` is not `completed`). */
   error?: string
+  /** Machine-routable fatal code when the error came from a WorkflowError. */
+  errorCode?: WorkflowErrorCode
   /**
-   * How many `agent()` calls the run accepted over its whole lifetime. On a
-   * graceful settlement this is the script-side count (calls still queued for
-   * a concurrency slot included); on a termination path (grace force-settle,
-   * worker death) it degrades to the host-observed count — calls queued
-   * inside a terminated script are unknowable then.
+   * Cumulative logical-agent spend, including earlier attempts supplied by a
+   * same-process supervisor. Graceful settlement counts admitted live calls;
+   * termination degrades to earlier spend plus host-observed starts because
+   * calls still queued inside a terminated script are unknowable.
    */
   agentsStarted: number
 }
 
-/** Identifying detail for a run, carried by every `workflow/*` event as borrowed immutable data, never the live run. */
+/** Identifying detail for a run, copied into every `workflow/*` observer payload, never the live run. */
 export interface WorkflowRunInfo {
   /** The run's id. */
   id: WorkflowRunId
@@ -96,7 +98,7 @@ export interface WorkflowRunInfo {
 
 /** One `agent()` call's identity within a run (the `workflow/agent-start` payload). */
 export interface WorkflowAgentInfo {
-  /** 1-based sequence number of this `agent()` call within the run. */
+  /** Monotonic member sequence for this launched child; unlaunched calls may leave gaps. */
   seq: number
   /** The display label (the `label` option, or a prompt snippet). */
   label: string
@@ -142,6 +144,8 @@ export interface WorkflowResultInfo {
   stopReason: WorkflowStopReason
   /** The failure message (present iff `stopReason` is not `completed`). */
   error?: string
+  /** Machine-routable fatal code when the error came from a WorkflowError. */
+  errorCode?: WorkflowErrorCode
   /** How many `agent()` calls the run accepted (see {@link WorkflowResult.agentsStarted}). */
   agentsStarted: number
 }

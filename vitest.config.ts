@@ -187,9 +187,9 @@ export default defineConfig({
         'packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx',
         'packages/client/ui-workspace/src/client/WorkspacePicker.tsx',
         'packages/client/web-react/src/*',
-        // This isolated settings-scope lifecycle has complete unit coverage;
-        // keep it out of the broader client-runtime GUI debt exemption.
-        'packages/client/runtime/src/**/!(settings-scope).ts',
+        // These isolated object-layer lifecycles have complete unit coverage;
+        // keep them out of the broader client-runtime GUI debt exemption.
+        'packages/client/runtime/src/**/!(settings-scope|controller).ts',
         // Keep the browser conversation tree under its existing GUI debt
         // exemption while gating the newly stateful Host half and vocabulary.
         'packages/client/ui-conversation/src/client/*',
@@ -220,14 +220,9 @@ export default defineConfig({
         // Slash/command/input round: per-file gaps deferred with the same
         // client-lane debt. TODO(gui): cover and remove with the lane above.
         'packages/client/connection/src/client/fixture.ts',
-        'packages/client/ui-commands/src/index.ts',
         'packages/client/ui-skill/src/index.ts',
         'packages/client/ui-input-trigger/src/index.ts',
         'packages/client/ui-subagent/src/index.ts',
-        'packages/client/ui-commands/src/client/popup.ts',
-        'packages/client/ui-commands/src/client/directory.ts',
-        'packages/client/ui-commands/src/client/service.ts',
-        'packages/client/ui-commands/src/client/PopupSelectView.tsx',
         'packages/client/ui-model-selection/src/index.ts',
         'packages/client/ui-permission-presets/src/index.ts',
         'packages/client/ui-model-selection/src/client/ModelSelect.tsx',

@@ -8,7 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { constants as bufferConstants } from 'node:buffer'
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -299,6 +299,68 @@ describe('readBytes', () => {
     const controller = new AbortController()
     controller.abort()
     await expect(fs.readBytes(await fs.resolve('a.bin'), controller.signal, 1024)).rejects.toMatchObject({ code: 'FS_ABORTED' })
+  })
+})
+
+describe('readBytesNoFollow', () => {
+  it.skipIf(process.platform === 'win32')('reads exact-limit bytes and allows symbolic-link ancestors', async () => {
+    const realDirectory = join(dir, 'real')
+    await mkdir(realDirectory)
+    await writeFile(join(realDirectory, 'a.bin'), Buffer.from([0, 1, 2, 3]))
+    await symlink(realDirectory, join(dir, 'linked-directory'))
+
+    await expect(fs.readBytesNoFollow('linked-directory/a.bin', {}, undefined, 4))
+      .resolves.toEqual(Buffer.from([0, 1, 2, 3]))
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects missing, directory, final-link, oversized, and aborted reads', async () => {
+    await mkdir(join(dir, 'directory'))
+    await writeFile(join(dir, 'target'), 'target')
+    await symlink('target', join(dir, 'linked'))
+    await writeFile(join(dir, 'large'), 'large')
+
+    await expect(fs.readBytesNoFollow('missing', {}, undefined, 8))
+      .rejects.toMatchObject({ code: 'FS_NOT_FOUND' })
+    await expect(fs.readBytesNoFollow('directory', {}, undefined, 8))
+      .rejects.toMatchObject({ code: 'FS_NOT_REGULAR_FILE' })
+    await expect(fs.readBytesNoFollow('linked', {}, undefined, 8))
+      .rejects.toMatchObject({ code: 'FS_NOT_REGULAR_FILE' })
+    await expect(fs.readBytesNoFollow('large', {}, undefined, 4))
+      .rejects.toMatchObject({ code: 'FS_TOO_LARGE' })
+    await expect(fs.readBytesNoFollow('target', {}, AbortSignal.abort(), 8))
+      .rejects.toMatchObject({ code: 'FS_ABORTED' })
+  })
+
+  it.skipIf(process.platform === 'win32')('reads the opened file when its path is replaced with a link', async () => {
+    const path = join(dir, 'source')
+    const moved = join(dir, 'opened-source')
+    const outside = join(dir, 'outside')
+    await writeFile(path, 'trusted')
+    await writeFile(outside, 'substituted')
+    fs.internals.inspectReadBytesNoFollowAfterOpen = async () => {
+      await rename(path, moved)
+      await symlink(outside, path)
+    }
+
+    await expect(fs.readBytesNoFollow(path, {}, undefined, 32))
+      .resolves.toEqual(Buffer.from('trusted'))
+    expect((await lstat(path)).isSymbolicLink()).toBe(true)
+  })
+
+  it.skipIf(process.platform === 'win32')('detects growth through the opened descriptor', async () => {
+    const path = join(dir, 'growing')
+    await writeFile(path, 'four')
+    fs.internals.inspectReadBytesNoFollowAfterOpen = async () => { await writeFile(path, 'too-large') }
+    await expect(fs.readBytesNoFollow(path, {}, undefined, 4))
+      .rejects.toMatchObject({ code: 'FS_TOO_LARGE' })
+  })
+
+  it('fails loud when the local platform lacks a safe no-follow read', async () => {
+    const path = join(dir, 'source')
+    await writeFile(path, 'content')
+    fs.internals = { platform: 'win32' }
+    await expect(fs.readBytesNoFollow(path, {}, undefined, 32))
+      .rejects.toMatchObject({ code: 'FS_IO_ERROR' })
   })
 })
 
@@ -595,6 +657,62 @@ describe('writeText', () => {
     expect(rejected).toHaveLength(1)
     expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ code: 'FS_STALE_VERSION' })
     expect(lockCount(fs)).toBe(0)
+  })
+})
+
+describe('writeTextNoFollow', () => {
+  it.skipIf(process.platform === 'win32')('creates and replaces a regular path with publication guards', async () => {
+    const path = join(dir, 'definition.json')
+    const created = await fs.writeTextNoFollow(
+      path, {}, 'first', { kind: 'createIfAbsent' },
+    )
+    const replaced = await fs.writeTextNoFollow(
+      path, {}, 'second', { kind: 'replaceIfVersion', version: created.version },
+    )
+
+    expect(created.operation).toBe('create')
+    expect(replaced.operation).toBe('update')
+    expect(replaced.before).toBeNull()
+    expect(await readFile(path, 'utf8')).toBe('second')
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects a static final link without changing its target', async () => {
+    const outside = join(dir, 'outside')
+    const linked = join(dir, 'linked')
+    await writeFile(outside, 'sentinel')
+    await symlink(outside, linked)
+
+    await expect(fs.writeTextNoFollow(
+      linked, {}, 'changed', { kind: 'createIfAbsent' },
+    )).rejects.toMatchObject({ code: 'FS_NOT_REGULAR_FILE' })
+    expect(await readFile(outside, 'utf8')).toBe('sentinel')
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects a final-link substitution at guarded replacement publication', async () => {
+    const path = join(dir, 'definition.json')
+    const moved = join(dir, 'original.json')
+    const outside = join(dir, 'outside.json')
+    await writeFile(path, 'old')
+    await writeFile(outside, 'sentinel')
+    const info = await fs.lstat(path)
+    if (info === undefined) throw new Error('expected definition')
+    fs.internals.inspectTemp = async () => {
+      await rename(path, moved)
+      await symlink(outside, path)
+    }
+
+    await expect(fs.writeTextNoFollow(
+      path, {}, 'new', { kind: 'replaceIfVersion', version: info.version },
+    )).rejects.toMatchObject({ code: 'FS_NOT_REGULAR_FILE' })
+    expect(await readFile(outside, 'utf8')).toBe('sentinel')
+    expect((await lstat(path)).isSymbolicLink()).toBe(true)
+  })
+
+  it('fails loud on an unsupported local platform', async () => {
+    fs.internals = { platform: 'win32' }
+    await expect(fs.writeTextNoFollow(
+      'definition.json', {}, 'new', { kind: 'createIfAbsent' },
+    )).rejects.toMatchObject({ code: 'FS_IO_ERROR' })
   })
 })
 

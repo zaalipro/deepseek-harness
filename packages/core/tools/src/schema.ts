@@ -55,10 +55,15 @@ export interface NullValueSchemaSpec extends ValueSchemaAnnotations {
   const?: null
 }
 
-/** Array value schema; omitted `items` accepts any lossless JSON item. */
+/** Array value schema with optional inclusive length bounds. */
 export interface ArrayValueSchemaSpec extends ValueSchemaAnnotations {
   type: 'array'
+  /** Omission accepts any lossless JSON item. */
   items?: ValueSchemaSpec
+  /** Inclusive non-negative minimum array length; it cannot exceed `maxItems`. */
+  minItems?: number
+  /** Inclusive non-negative maximum array length; it cannot be below `minItems`. */
+  maxItems?: number
 }
 
 /**
@@ -380,9 +385,11 @@ function runSchemaCompiler(initial: CompileTask): void {
         }
         break
       case 'array':
-        assertAuthorKeys(input, path, [...authorKeys, 'type', 'items'])
+        assertAuthorKeys(input, path, [...authorKeys, 'type', 'items', 'minItems', 'maxItems'])
         node.type = 'array'
         copyAnnotations(input, node)
+        if (Object.hasOwn(input, 'minItems')) node.minItems = input.minItems as number
+        if (Object.hasOwn(input, 'maxItems')) node.maxItems = input.maxItems as number
         if (Object.hasOwn(input, 'items')) {
           tasks.push({
             kind: 'value',

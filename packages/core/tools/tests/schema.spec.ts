@@ -18,8 +18,12 @@ describe('the unified author schema DSL', () => {
     expect(valueSchemaSpecToJsonSchema({ type: 'integer' })).toEqual({ type: 'integer' })
     expect(valueSchemaSpecToJsonSchema({ type: 'boolean' })).toEqual({ type: 'boolean' })
     expect(valueSchemaSpecToJsonSchema({ type: 'null' })).toEqual({ type: 'null' })
-    expect(valueSchemaSpecToJsonSchema({ type: 'array', items: { type: 'json' } }))
-      .toEqual({ type: 'array', items: {} })
+    expect(valueSchemaSpecToJsonSchema({
+      type: 'array',
+      items: { type: 'json' },
+      minItems: 1,
+      maxItems: 8,
+    })).toEqual({ type: 'array', items: {}, minItems: 1, maxItems: 8 })
     expect(valueSchemaSpecToJsonSchema({ type: 'object', additionalProperties: false, properties: {} }))
       .toEqual({ type: 'object', additionalProperties: false, properties: {} })
     expect(valueSchemaSpecToJsonSchema({
@@ -67,6 +71,8 @@ describe('the unified author schema DSL', () => {
       { type: 'json', default: undefined },
       { type: 'array', items: { type: 'string', required: true } },
       { type: 'array', items: 42 },
+      { type: 'array', minItems: -1 },
+      { type: 'array', minItems: 2, maxItems: 1 },
       { type: 'string', extra: true },
       { type: 'string', oneOf: [{ type: 'string' }, { type: 'null' }] },
       { oneOf: 'not-an-array' },
@@ -146,6 +152,7 @@ describe('the unified author schema DSL', () => {
     expectTypeOf<InferValue<{ type: 'boolean'; enum: readonly [true] }>>().toEqualTypeOf<true>()
     expectTypeOf<InferValue<{ type: 'null' }>>().toEqualTypeOf<null>()
     expectTypeOf<InferValue<{ type: 'array'; items: { type: 'string' } }>>().toEqualTypeOf<string[]>()
+    expectTypeOf<InferValue<{ type: 'array'; minItems: 1; maxItems: 2 }>>().toEqualTypeOf<JsonValue[]>()
     expectTypeOf<InferValue<{ type: 'array' }>>().toEqualTypeOf<JsonValue[]>()
     expectTypeOf<InferValue<{ type: 'json' }>>().toEqualTypeOf<JsonValue>()
     expectTypeOf<InferValue<{ oneOf: readonly [{ type: 'string' }, { type: 'null' }] }>>()

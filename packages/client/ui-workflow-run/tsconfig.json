@@ -33,7 +33,7 @@
       "path": "../../workflow/workflow"
     },
     {
-      "path": "../../workflow/tool-workflow"
+      "path": "../../workflow/workflow-run-recorder"
     },
     {
       "path": "../../runtime-diagnostics/invariants"

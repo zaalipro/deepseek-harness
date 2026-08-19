@@ -259,6 +259,31 @@ describe('ToolRuntime', () => {
     expect(mismatch.content[0]?.type === 'text' ? mismatch.content[0].text : '').toContain('"value" must be a string')
   })
 
+  it('enforces array bounds on canonical tool outputs', async () => {
+    const ctx = await setup()
+    ctx.tools.register(defineTool({
+      name: 'bounded-output',
+      description: 'bounded output',
+      parameters: {},
+      output: {
+        schema: { type: 'array', minItems: 1, maxItems: 1, items: { type: 'string' } },
+        render: (_args, value) => [{ type: 'text', text: value.join(',') }],
+      },
+      execute: async () => ['one', 'two'],
+    }))
+
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('bounded-output'),
+      name: 'bounded-output',
+      arguments: {},
+    })
+
+    expect(result.error).toMatchObject({ info: { name: 'ToolOutputError', code: 'INVALID_TOOL_OUTPUT' } })
+    expect(result.content[0]?.type === 'text' ? result.content[0].text : '')
+      .toContain('"value" must contain at most 1 item')
+  })
+
   it('classifies a throwing body snapshot as invalid tool output', async () => {
     const ctx = await setup()
     const hostile = Object.defineProperty({}, 'value', {
@@ -2542,13 +2567,16 @@ describe('validateArgs (the runtime-validation Agent Note, part 1)', () => {
     ])
   })
 
-  it('recurses into array items (and an array without items only type-checks)', () => {
+  it('recurses into array items and applies bounds without an item schema', () => {
     const spec = {
       tags: { type: 'array', items: { type: 'string' } },
       raw: { type: 'array' },
+      bounded: { type: 'array', minItems: 1, maxItems: 2 },
     } satisfies ParameterSchemaSpec
-    expect(validateArgs(spec, { tags: ['a', 'b'], raw: [1, {}, 'x'] })).toEqual([])
+    expect(validateArgs(spec, { tags: ['a', 'b'], raw: [1, {}, 'x'], bounded: [null] })).toEqual([])
     expect(validateArgs(spec, { tags: ['a', 2] })).toEqual(['"tags[1]" must be a string'])
+    expect(validateArgs(spec, { bounded: [] })).toEqual(['"bounded" must contain at least 1 item'])
+    expect(validateArgs(spec, { bounded: [1, 2, 3] })).toEqual(['"bounded" must contain at most 2 items'])
     // a non-array value for an array-typed prop
     expect(validateArgs(spec, { tags: 'nope' })).toEqual(['"tags" must be an array'])
   })

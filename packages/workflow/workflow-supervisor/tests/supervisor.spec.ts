@@ -48,9 +48,13 @@ async function setup() {
   ctx.provide('workflows', { get: async () => undefined, list: async () => [] })
   await ctx.plugin(WorkflowSupervisor, { enabled: true, dshHome: root, runsRoot: join(root, 'workflow-runs') })
   const engine = ctx.workflowEngine as StubEngine
-  const session = Session.create(SessionId('session-1')) as unknown as Session
-  const parent = { id: session.id, options: {}, session, inject: () => {} } as unknown as Agent
+  const session = Session.create(SessionId('session-1'))
+  const parent = { id: session.id, options: {}, session, ctx, inject: () => {} } as unknown as Agent
   return { ctx, engine, parent, session, project }
+}
+
+async function runs(ctx: Context, parent: Agent) {
+  return (await ctx.workflowSupervisor.listForClient(parent, {}, new AbortController().signal)).items
 }
 
 describe('WorkflowSupervisor', () => {
@@ -60,16 +64,19 @@ describe('WorkflowSupervisor', () => {
     const second = await ctx.workflowSupervisor.start({ script: 'return 2', meta: META, parent })
     expect(first.displayName).toBe('audit')
     expect(second.displayName).toBe('audit-2')
-    expect(ctx.workflowSupervisor.listRuns(parent).map(run => run.displayName)).toEqual(['audit', 'audit-2'])
+    expect((await runs(ctx, parent)).map(run => run.displayName)).toEqual(['audit', 'audit-2'])
   })
 
   it('launches in the background and owns the run handle', async () => {
     const { ctx, engine, parent } = await setup()
     const launched = await ctx.workflowSupervisor.start({ script: 'return 1', meta: META, parent })
     expect(launched.status).toBe('started')
-    expect(String(launched.runId)).toBe('run-1')
+    expect(String(launched.runId)).toMatch(/^workflow-/u)
+    expect(String(launched.runId)).not.toBe('run-1')
     expect(engine.requests).toHaveLength(1)
-    expect(engine.requests[0]).toMatchObject({ script: 'return 1', meta: META, parent })
+    expect(engine.requests[0]?.script).toBe('return 1')
+    expect(engine.requests[0]?.meta).toEqual(META)
+    expect(engine.requests[0]?.parent).toBe(parent)
     // The run returns immediately; the supervisor does not await settlement.
     expect(engine.settlements.has('run-1')).toBe(true)
   })
@@ -77,14 +84,14 @@ describe('WorkflowSupervisor', () => {
   it('pause cancels the run and marks it paused; resume re-runs with the journal', async () => {
     const { ctx, engine, parent } = await setup()
     const launched = await ctx.workflowSupervisor.start({ script: 'return 1', meta: META, parent })
-    ctx.workflowSupervisor.pause('audit', parent)
+    await ctx.workflowSupervisor.pause('audit', parent)
     expect(engine.cancels).toEqual(['paused by user'])
-    const views = ctx.workflowSupervisor.listRuns(parent)
+    const views = await runs(ctx, parent)
     expect(views[0]?.status).toBe('paused')
     // Resume starts a second engine run (journal replay path).
     ctx.workflowSupervisor.resume('audit', parent)
     expect(engine.requests).toHaveLength(2)
-    expect(ctx.workflowSupervisor.listRuns(parent)[0]?.status).toBe('running')
+    expect((await runs(ctx, parent))[0]?.status).toBe('running')
     void launched
   })
 
@@ -95,7 +102,9 @@ describe('WorkflowSupervisor', () => {
     await expect(ctx.workflowSupervisor.save('audit-2', parent)).rejects.toThrow(/numbered handle/)
     // A bundled definition hides save too.
     await ctx.workflowSupervisor.start({
-      definition: { name: 'builtin', description: 'd', script: 'return 3', scope: 'bundled' },
+      definition: {
+        name: 'builtin', description: 'd', script: 'return 3', scope: 'bundled', path: '/bundled/builtin.js',
+      },
       parent,
     })
     await expect(ctx.workflowSupervisor.save('builtin', parent)).rejects.toThrow(/built-in/)
@@ -105,7 +114,9 @@ describe('WorkflowSupervisor', () => {
     const { ctx, parent } = await setup()
     await ctx.workflowSupervisor.start({ script: 'return 1', meta: META, parent })
     ctx.workflowSupervisor.markInterrupted()
-    expect(ctx.workflowSupervisor.listRuns(parent)[0]?.status).toBe('interrupted')
-    expect(() => ctx.workflowSupervisor.resume('audit', parent)).toThrow(/cannot resume/)
+    await expect.poll(async () => (await runs(ctx, parent))[0]?.status).toBe('interrupted')
+    expect(() => {
+      ctx.workflowSupervisor.resume('audit', parent)
+    }).toThrow(/cannot resume/)
   })
 })

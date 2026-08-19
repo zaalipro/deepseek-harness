@@ -156,6 +156,7 @@ flowchart TD
     pkg_client_ui_trajectory["client-ui-trajectory"]
     pkg_client_ui_user_questions["client-ui-user-questions"]
     pkg_client_ui_workflow_run["client-ui-workflow-run"]
+    pkg_client_ui_workflows["client-ui-workflows"]
     pkg_client_ui_workspace["client-ui-workspace"]
     pkg_client_web["client-web"]
     pkg_client_web_react["client-web-react"]
@@ -318,9 +319,14 @@ flowchart TD
     pkg_typert_registry["typert-registry"]
   end
   subgraph group_workflow["packages/workflow"]
+    pkg_command_workflows["command-workflows"]
     pkg_tool_ralph["tool-ralph"]
     pkg_tool_workflow["tool-workflow"]
     pkg_workflow["workflow"]
+    pkg_workflow_registry["workflow-registry"]
+    pkg_workflow_run_recorder["workflow-run-recorder"]
+    pkg_workflow_supervisor["workflow-supervisor"]
+    pkg_workflow_user_questions["workflow-user-questions"]
     pkg_workflow_worker_thread["workflow-worker-thread"]
   end
   subgraph group_workspace["packages/workspace"]
@@ -642,11 +648,6 @@ flowchart TD
   pkg_acp --> pkg_invariants
   pkg_acp --> pkg_session
   pkg_acp --> pkg_user_approval
-  pkg_headless --> pkg_agent
-  pkg_headless --> pkg_agent_default_model
-  pkg_headless --> pkg_invariants
-  pkg_headless --> pkg_llm
-  pkg_headless --> pkg_session
   pkg_compaction --> pkg_brand
   pkg_compaction --> pkg_commands
   pkg_compaction --> pkg_invariants
@@ -707,6 +708,10 @@ flowchart TD
   pkg_terminal_bash --> pkg_session
   pkg_terminal_bash --> pkg_subprocess
   pkg_terminal_bash --> pkg_terminal
+  pkg_workflow_registry --> pkg_fs
+  pkg_workflow_registry --> pkg_invariants
+  pkg_workflow_registry --> pkg_session
+  pkg_workflow_registry --> pkg_typert_protocol
   pkg_token_meter --> pkg_compaction
   pkg_token_meter --> pkg_invariants
   pkg_token_meter --> pkg_llm
@@ -943,13 +948,15 @@ flowchart TD
   pkg_llm_replay --> pkg_invariants
   pkg_llm_replay --> pkg_llm
   pkg_llm_replay --> pkg_session
-  pkg_tool_workflow --> pkg_agent
-  pkg_tool_workflow --> pkg_invariants
-  pkg_tool_workflow --> pkg_llm
-  pkg_tool_workflow --> pkg_session
-  pkg_tool_workflow --> pkg_system_prompt
-  pkg_tool_workflow --> pkg_tools
-  pkg_tool_workflow --> pkg_workflow
+  pkg_workflow_supervisor --> pkg_agent
+  pkg_workflow_supervisor --> pkg_brand
+  pkg_workflow_supervisor --> pkg_invariants
+  pkg_workflow_supervisor --> pkg_llm
+  pkg_workflow_supervisor --> pkg_output_retention
+  pkg_workflow_supervisor --> pkg_session
+  pkg_workflow_supervisor --> pkg_typert_protocol
+  pkg_workflow_supervisor --> pkg_workflow
+  pkg_workflow_supervisor --> pkg_workflow_registry
   pkg_subagent_acp --> pkg_agent
   pkg_subagent_acp --> pkg_invariants
   pkg_subagent_acp --> pkg_llm
@@ -1010,6 +1017,14 @@ flowchart TD
   pkg_api_remotes --> pkg_session_persistence
   pkg_api_remotes --> pkg_settings
   pkg_api_remotes --> pkg_typert_registry
+  pkg_api_remotes --> pkg_workflow_registry
+  pkg_api_remotes --> pkg_workflow_supervisor
+  pkg_headless --> pkg_agent
+  pkg_headless --> pkg_agent_default_model
+  pkg_headless --> pkg_invariants
+  pkg_headless --> pkg_llm
+  pkg_headless --> pkg_session
+  pkg_headless --> pkg_workflow_supervisor
   pkg_web_app --> pkg_invariants
   pkg_web_app --> pkg_shell_env
   pkg_web_app --> pkg_system_prompt
@@ -1062,6 +1077,14 @@ flowchart TD
   pkg_tool_ralph --> pkg_system_prompt
   pkg_tool_ralph --> pkg_tools
   pkg_tool_ralph --> pkg_workflow
+  pkg_workflow_run_recorder --> pkg_agent
+  pkg_workflow_run_recorder --> pkg_invariants
+  pkg_workflow_run_recorder --> pkg_session
+  pkg_workflow_run_recorder --> pkg_workflow_supervisor
+  pkg_workflow_user_questions --> pkg_invariants
+  pkg_workflow_user_questions --> pkg_user_questions
+  pkg_workflow_user_questions --> pkg_workflow
+  pkg_workflow_user_questions --> pkg_workflow_supervisor
   pkg_workflow_worker_thread --> pkg_agent
   pkg_workflow_worker_thread --> pkg_brand
   pkg_workflow_worker_thread --> pkg_invariants
@@ -1131,6 +1154,25 @@ flowchart TD
   pkg_sdk_jsonrpc_server --> pkg_sdk_protocol
   pkg_sdk_jsonrpc_server --> pkg_session
   pkg_sdk_jsonrpc_server --> pkg_subagent
+  pkg_command_workflows --> pkg_agent
+  pkg_command_workflows --> pkg_commands
+  pkg_command_workflows --> pkg_invariants
+  pkg_command_workflows --> pkg_llm
+  pkg_command_workflows --> pkg_skill
+  pkg_command_workflows --> pkg_workflow_registry
+  pkg_command_workflows --> pkg_workflow_run_recorder
+  pkg_command_workflows --> pkg_workflow_supervisor
+  pkg_tool_workflow --> pkg_agent
+  pkg_tool_workflow --> pkg_fs
+  pkg_tool_workflow --> pkg_invariants
+  pkg_tool_workflow --> pkg_llm
+  pkg_tool_workflow --> pkg_session
+  pkg_tool_workflow --> pkg_system_prompt
+  pkg_tool_workflow --> pkg_tools
+  pkg_tool_workflow --> pkg_workflow
+  pkg_tool_workflow --> pkg_workflow_registry
+  pkg_tool_workflow --> pkg_workflow_run_recorder
+  pkg_tool_workflow --> pkg_workflow_supervisor
   pkg_subagent_dsh_sdk --> pkg_agent
   pkg_subagent_dsh_sdk --> pkg_invariants
   pkg_subagent_dsh_sdk --> pkg_llm
@@ -1357,8 +1399,8 @@ flowchart TD
   pkg_client_ui_workflow_run --> pkg_client_ui_slots
   pkg_client_ui_workflow_run --> pkg_invariants
   pkg_client_ui_workflow_run --> pkg_session
-  pkg_client_ui_workflow_run --> pkg_tool_workflow
   pkg_client_ui_workflow_run --> pkg_workflow
+  pkg_client_ui_workflow_run --> pkg_workflow_run_recorder
   pkg_host_directory_picker_auto --> pkg_client_ui_directory_picker_browse
   pkg_host_directory_picker_auto --> pkg_client_ui_directory_picker_native
   pkg_host_directory_picker_auto --> pkg_host_directory_picker_browse
@@ -1404,6 +1446,14 @@ flowchart TD
   pkg_client_ui_skill --> pkg_client_ui_slots
   pkg_client_ui_skill --> pkg_client_ui_tool
   pkg_client_ui_skill --> pkg_invariants
+  pkg_client_ui_workflows --> pkg_api_remotes
+  pkg_client_ui_workflows --> pkg_client_locale
+  pkg_client_ui_workflows --> pkg_client_runtime
+  pkg_client_ui_workflows --> pkg_client_ui_commands
+  pkg_client_ui_workflows --> pkg_client_ui_layout
+  pkg_client_ui_workflows --> pkg_client_ui_primitives
+  pkg_client_ui_workflows --> pkg_client_ui_slots
+  pkg_client_ui_workflows --> pkg_invariants
   pkg_client_ui_cordis --> pkg_api_remotes
   pkg_client_ui_cordis --> pkg_client_connection
   pkg_client_ui_cordis --> pkg_client_locale
@@ -1525,7 +1575,6 @@ flowchart TD
 | [`hook-protocol`](../packages/hooks/hook-protocol) | `hooks` | [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`shell`](../packages/shell/shell) |
 | [`session-query`](../packages/session-query/session-query) | `session-query` | [`brand`](../packages/util/brand), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`session-persistence`](../packages/session/session-persistence), [`session-title`](../packages/session/session-title) |
 | [`acp`](../packages/acp/acp) | `acp` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`user-approval`](../packages/interaction/user-approval) |
-| [`headless`](../packages/bundle/headless) | `bundle` | [`agent`](../packages/core/agent), [`agent-default-model`](../packages/core/agent-default-model), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session) |
 | [`compaction`](../packages/compaction/compaction) | `compaction` | [`brand`](../packages/util/brand), [`commands`](../packages/interaction/commands), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session) |
 | [`tmux-context`](../packages/context/tmux-context) | `context` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`shell`](../packages/shell/shell) |
 | [`fs-e2b`](../packages/e2b/fs-e2b) | `e2b` | [`e2b`](../packages/e2b/e2b), [`fs`](../packages/fs/fs), [`invariants`](../packages/runtime-diagnostics/invariants) |
@@ -1537,6 +1586,7 @@ flowchart TD
 | [`bash-local`](../packages/shell/bash-local) | `shell` | [`invariants`](../packages/runtime-diagnostics/invariants), [`settings`](../packages/settings/settings), [`shell`](../packages/shell/shell), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
 | [`pwsh-local`](../packages/shell/pwsh-local) | `shell` | [`invariants`](../packages/runtime-diagnostics/invariants), [`settings`](../packages/settings/settings), [`shell`](../packages/shell/shell), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
 | [`terminal-bash`](../packages/terminal/terminal-bash) | `terminal` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`sandbox`](../packages/sandbox/sandbox), [`sandbox-policy`](../packages/sandbox/sandbox-policy), [`session`](../packages/core/session), [`subprocess`](../packages/subprocess/subprocess), [`terminal`](../packages/terminal/terminal) |
+| [`workflow-registry`](../packages/workflow/workflow-registry) | `workflow` | [`fs`](../packages/fs/fs), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`typert-protocol`](../packages/typert/protocol) |
 | [`token-meter`](../packages/llm/token-meter) | `llm` | [`compaction`](../packages/compaction/compaction), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`session-projection`](../packages/session/session-projection) |
 | [`agent-loop`](../packages/core/agent-loop) | `core` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`scope`](../packages/core/scope), [`session`](../packages/core/session), [`session-persistence`](../packages/session/session-persistence), [`settings`](../packages/settings/settings), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools) |
 | [`agent-tool-presentation`](../packages/core/agent-tool-presentation) | `core` | [`invariants`](../packages/runtime-diagnostics/invariants), [`tools`](../packages/core/tools) |
@@ -1576,7 +1626,7 @@ flowchart TD
 | [`tool-terminal`](../packages/terminal/tool-terminal) | `terminal` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`llm`](../packages/llm/llm), [`output-retention`](../packages/util/output-retention), [`system-prompt`](../packages/core/system-prompt), [`terminal`](../packages/terminal/terminal), [`tools`](../packages/core/tools) |
 | [`agent-loop-testkit`](../packages/test-support/agent-loop-testkit) | `test-support` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools) |
 | [`llm-replay`](../packages/test-support/llm-replay) | `test-support` | [`compaction`](../packages/compaction/compaction), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session) |
-| [`tool-workflow`](../packages/workflow/tool-workflow) | `workflow` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`workflow`](../packages/workflow/workflow) |
+| [`workflow-supervisor`](../packages/workflow/workflow-supervisor) | `workflow` | [`agent`](../packages/core/agent), [`brand`](../packages/util/brand), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`output-retention`](../packages/util/output-retention), [`session`](../packages/core/session), [`typert-protocol`](../packages/typert/protocol), [`workflow`](../packages/workflow/workflow), [`workflow-registry`](../packages/workflow/workflow-registry) |
 | [`subagent-acp`](../packages/subagent/subagent-acp) | `subagent` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
 | [`subagent-claude-code`](../packages/subagent/subagent-claude-code) | `subagent` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
 | [`subagent-in-process-driver`](../packages/subagent/subagent-in-process-driver) | `subagent` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools) |
@@ -1584,7 +1634,8 @@ flowchart TD
 | [`tool-subagent-control`](../packages/subagent/tool-subagent-control) | `subagent` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`tools`](../packages/core/tools) |
 | [`tool-subagent-report`](../packages/subagent/tool-subagent-report) | `subagent` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`subagent`](../packages/subagent/subagent), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools) |
 | [`hooks-claude-code`](../packages/hooks/hooks-claude-code) | `hooks` | [`agent`](../packages/core/agent), [`hook-protocol`](../packages/hooks/hook-protocol), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`session-persistence`](../packages/session/session-persistence), [`subagent`](../packages/subagent/subagent), [`tools`](../packages/core/tools) |
-| [`api-remotes`](../packages/api/remotes) | `api` | [`agent`](../packages/core/agent), [`agent-presets`](../packages/preset/agent-presets), [`api-gateway`](../packages/api/gateway), [`commands`](../packages/interaction/commands), [`cordis-host-runner`](../packages/extensions/cordis-host-runner), [`credentials`](../packages/credentials/credentials), [`goal`](../packages/goal/goal), [`host-plugin-inventory`](../packages/host/plugin-inventory), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`message-feedback`](../packages/feedback/message-feedback), [`session`](../packages/core/session), [`session-persistence`](../packages/session/session-persistence), [`settings`](../packages/settings/settings), [`typert-registry`](../packages/typert/registry) |
+| [`api-remotes`](../packages/api/remotes) | `api` | [`agent`](../packages/core/agent), [`agent-presets`](../packages/preset/agent-presets), [`api-gateway`](../packages/api/gateway), [`commands`](../packages/interaction/commands), [`cordis-host-runner`](../packages/extensions/cordis-host-runner), [`credentials`](../packages/credentials/credentials), [`goal`](../packages/goal/goal), [`host-plugin-inventory`](../packages/host/plugin-inventory), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`message-feedback`](../packages/feedback/message-feedback), [`session`](../packages/core/session), [`session-persistence`](../packages/session/session-persistence), [`settings`](../packages/settings/settings), [`typert-registry`](../packages/typert/registry), [`workflow-registry`](../packages/workflow/workflow-registry), [`workflow-supervisor`](../packages/workflow/workflow-supervisor) |
+| [`headless`](../packages/bundle/headless) | `bundle` | [`agent`](../packages/core/agent), [`agent-default-model`](../packages/core/agent-default-model), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`workflow-supervisor`](../packages/workflow/workflow-supervisor) |
 | [`web-app`](../packages/bundle/web-app) | `bundle` | [`invariants`](../packages/runtime-diagnostics/invariants), [`shell-env`](../packages/shell/shell-env), [`system-prompt`](../packages/core/system-prompt) |
 | [`compaction-tool-result-pruner`](../packages/compaction/compaction-tool-result-pruner) | `compaction` | [`compaction`](../packages/compaction/compaction), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`token-meter`](../packages/llm/token-meter) |
 | [`tool-cordis`](../packages/extensions/tool-cordis) | `extensions` | [`agent`](../packages/core/agent), [`cordis-host-runner`](../packages/extensions/cordis-host-runner), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`scope`](../packages/core/scope), [`session`](../packages/core/session), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools) |
@@ -1593,6 +1644,8 @@ flowchart TD
 | [`tool-bash`](../packages/shell/tool-bash) | `shell` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`llm`](../packages/llm/llm), [`sandbox`](../packages/sandbox/sandbox), [`sandbox-policy`](../packages/sandbox/sandbox-policy), [`shell`](../packages/shell/shell), [`shell-env`](../packages/shell/shell-env), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`user-approval`](../packages/interaction/user-approval) |
 | [`tool-pwsh`](../packages/shell/tool-pwsh) | `shell` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`llm`](../packages/llm/llm), [`sandbox`](../packages/sandbox/sandbox), [`sandbox-policy`](../packages/sandbox/sandbox-policy), [`shell`](../packages/shell/shell), [`shell-env`](../packages/shell/shell-env), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`user-approval`](../packages/interaction/user-approval) |
 | [`tool-ralph`](../packages/workflow/tool-ralph) | `workflow` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`subagent`](../packages/subagent/subagent), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`workflow`](../packages/workflow/workflow) |
+| [`workflow-run-recorder`](../packages/workflow/workflow-run-recorder) | `workflow` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`workflow-supervisor`](../packages/workflow/workflow-supervisor) |
+| [`workflow-user-questions`](../packages/workflow/workflow-user-questions) | `workflow` | [`invariants`](../packages/runtime-diagnostics/invariants), [`user-questions`](../packages/interaction/user-questions), [`workflow`](../packages/workflow/workflow), [`workflow-supervisor`](../packages/workflow/workflow-supervisor) |
 | [`workflow-worker-thread`](../packages/workflow/workflow-worker-thread) | `workflow` | [`agent`](../packages/core/agent), [`brand`](../packages/util/brand), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`tools`](../packages/core/tools), [`workflow`](../packages/workflow/workflow) |
 | [`subagent-codex`](../packages/subagent/subagent-codex) | `subagent` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`sdk-protocol`](../packages/sdk/protocol), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
 | [`subagent-fork-in-process`](../packages/subagent/subagent-fork-in-process) | `subagent` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subagent-in-process-driver`](../packages/subagent/subagent-in-process-driver) |
@@ -1602,6 +1655,8 @@ flowchart TD
 | [`agent-spine-demo`](../packages/examples/agent-spine-demo) | `examples` | [`agent`](../packages/core/agent), [`agent-instructions`](../packages/context/agent-instructions), [`agent-loop`](../packages/core/agent-loop), [`goal`](../packages/goal/goal), [`goal-round-driver`](../packages/goal/goal-round-driver), [`home-paths`](../packages/util/home-paths), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs-local`](../packages/jobs/jobs-local), [`llm`](../packages/llm/llm), [`llm-retry`](../packages/llm/llm-retry), [`scope`](../packages/core/scope), [`session`](../packages/core/session), [`session-title`](../packages/session/session-title), [`shell-env`](../packages/shell/shell-env), [`skill`](../packages/skill/skill), [`skill-filesystem`](../packages/skill/skill-filesystem), [`system-prompt`](../packages/core/system-prompt), [`tool-bash`](../packages/shell/tool-bash), [`tool-goal`](../packages/goal/tool-goal), [`tool-jobs`](../packages/jobs/tool-jobs), [`tool-skill`](../packages/skill/tool-skill), [`tools`](../packages/core/tools) |
 | [`sdk-client`](../packages/sdk/client) | `sdk` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`sdk-protocol`](../packages/sdk/protocol), [`session`](../packages/core/session) |
 | [`sdk-jsonrpc-server`](../packages/sdk/server) | `sdk` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`llm-deepseek`](../packages/llm/llm-deepseek), [`scope`](../packages/core/scope), [`sdk-protocol`](../packages/sdk/protocol), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent) |
+| [`command-workflows`](../packages/workflow/command-workflows) | `workflow` | [`agent`](../packages/core/agent), [`commands`](../packages/interaction/commands), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`skill`](../packages/skill/skill), [`workflow-registry`](../packages/workflow/workflow-registry), [`workflow-run-recorder`](../packages/workflow/workflow-run-recorder), [`workflow-supervisor`](../packages/workflow/workflow-supervisor) |
+| [`tool-workflow`](../packages/workflow/tool-workflow) | `workflow` | [`agent`](../packages/core/agent), [`fs`](../packages/fs/fs), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`workflow`](../packages/workflow/workflow), [`workflow-registry`](../packages/workflow/workflow-registry), [`workflow-run-recorder`](../packages/workflow/workflow-run-recorder), [`workflow-supervisor`](../packages/workflow/workflow-supervisor) |
 | [`subagent-dsh-sdk`](../packages/subagent/subagent-dsh-sdk) | `subagent` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`sdk-client`](../packages/sdk/client), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subprocess`](../packages/subprocess/subprocess) |
 | [`client-ui-settings`](../packages/client/ui-settings) | `client` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-runtime`](../packages/client/runtime), [`client-schema-form`](../packages/client/schema-form), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants), [`settings`](../packages/settings/settings) |
 | [`client-ui-settings-models`](../packages/client/ui-settings-models) | `client` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-runtime`](../packages/client/runtime), [`client-schema-form`](../packages/client/schema-form), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`client-web-react`](../packages/client/web-react), [`invariants`](../packages/runtime-diagnostics/invariants) |
@@ -1631,10 +1686,11 @@ flowchart TD
 | [`client-ui-plan`](../packages/client/ui-plan) | `client` | [`api-remotes`](../packages/api/remotes), [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-conversation`](../packages/client/ui-conversation), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants), [`plan-mode`](../packages/plan/plan-mode) |
 | [`client-ui-subagent`](../packages/client/ui-subagent) | `client` | [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-conversation`](../packages/client/ui-conversation), [`client-ui-input-trigger`](../packages/client/ui-input-trigger), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants), [`subagent`](../packages/subagent/subagent), [`token-meter`](../packages/llm/token-meter) |
 | [`client-ui-tool`](../packages/client/ui-tool) | `client` | [`api-remotes`](../packages/api/remotes), [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-conversation`](../packages/client/ui-conversation), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants) |
-| [`client-ui-workflow-run`](../packages/client/ui-workflow-run) | `client` | [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-conversation`](../packages/client/ui-conversation), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`tool-workflow`](../packages/workflow/tool-workflow), [`workflow`](../packages/workflow/workflow) |
+| [`client-ui-workflow-run`](../packages/client/ui-workflow-run) | `client` | [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-conversation`](../packages/client/ui-conversation), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`workflow`](../packages/workflow/workflow), [`workflow-run-recorder`](../packages/workflow/workflow-run-recorder) |
 | [`host-directory-picker-auto`](../packages/host/directory-picker-auto) | `host` | [`client-ui-directory-picker-browse`](../packages/client/ui-directory-picker-browse), [`client-ui-directory-picker-native`](../packages/client/ui-directory-picker-native), [`host-directory-picker-browse`](../packages/host/directory-picker-browse), [`host-directory-picker-native`](../packages/host/directory-picker-native), [`host-webserver`](../packages/host/webserver), [`invariants`](../packages/runtime-diagnostics/invariants) |
 | [`session-log-export`](../packages/session-query/session-log-export) | `session-query` | [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-commands`](../packages/client/ui-commands), [`client-ui-conversation`](../packages/client/ui-conversation), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`commands`](../packages/interaction/commands), [`invariants`](../packages/runtime-diagnostics/invariants) |
 | [`client-ui-model-selection`](../packages/client/ui-model-selection) | `client` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-commands`](../packages/client/ui-commands), [`client-ui-conversation`](../packages/client/ui-conversation), [`client-ui-input-trigger`](../packages/client/ui-input-trigger), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants) |
 | [`client-ui-permission-presets`](../packages/client/ui-permission-presets) | `client` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-schema-form`](../packages/client/schema-form), [`client-ui-commands`](../packages/client/ui-commands), [`client-ui-input-trigger`](../packages/client/ui-input-trigger), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-settings`](../packages/client/ui-settings), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants), [`permission-presets`](../packages/interaction/permission-presets) |
 | [`client-ui-skill`](../packages/client/ui-skill) | `client` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-input-trigger`](../packages/client/ui-input-trigger), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`client-ui-tool`](../packages/client/ui-tool), [`invariants`](../packages/runtime-diagnostics/invariants) |
+| [`client-ui-workflows`](../packages/client/ui-workflows) | `client` | [`api-remotes`](../packages/api/remotes), [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-commands`](../packages/client/ui-commands), [`client-ui-layout`](../packages/client/ui-layout), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants) |
 | [`client-ui-cordis`](../packages/extensions/ui-cordis) | `extensions` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-locale`](../packages/client/locale), [`client-runtime`](../packages/client/runtime), [`client-ui-input-trigger`](../packages/client/ui-input-trigger), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-sidebar`](../packages/client/ui-sidebar), [`client-ui-slots`](../packages/client/ui-slots), [`client-ui-tool`](../packages/client/ui-tool), [`cordis-client-runner`](../packages/extensions/cordis-client-runner), [`invariants`](../packages/runtime-diagnostics/invariants) |

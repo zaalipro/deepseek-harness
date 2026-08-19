@@ -149,9 +149,9 @@ export interface InputTriggerSource {
   /**
    * Enter-time adjudication; may strong-wait the source's own warmup and
    * reject on warmup failure. `line` is the full trimmed draft: the source
-   * parses it and applies its own kind policy — args-tolerant kinds claim
-   * with trailing text present, bare-token-only kinds answer undefined
-   * unless the line is exactly the token.
+   * parses it and applies its own kind policy. A source that owns a command
+   * plane must answer `handled` for unknown or malformed lines so they cannot
+   * fall through to the model input sink.
    */
   matchEnter?(session: ClientSessionContext, line: string, signal: AbortSignal): Promise<PickOutcome>
   /**

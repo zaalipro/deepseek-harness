@@ -527,8 +527,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Workflow script engine',
     mode: 'seam',
     implementations: ['workflow-worker-thread'],
-    consumers: ['tool-workflow', 'tool-ralph'],
-    note: 'One engine per context, as in bash, with no named-provider registry; the general workflow and fixed Ralph consumers start runs whose agent() calls fan out through ctx.subagents.',
+    consumers: ['tool-ralph', 'workflow-supervisor'],
+    note: 'One engine per context, as in bash, with no named-provider registry; the fixed Ralph consumer and logical-run supervisor start attempts whose agent() calls fan out through ctx.subagents.',
   },
   {
     key: 'workflows',
@@ -543,8 +543,16 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'workflow-supervisor',
     title: 'Workflow run supervisor',
     mode: 'core',
+    consumers: ['command-workflows', 'tool-workflow', 'workflow-run-recorder'],
+    note: 'Owns stable logical runs over live WorkflowRun attempts: background launch, journal pause/resume, bounded retained manifests, typed Remote reads and controls, and exact-owner completion.',
+  },
+  {
+    key: 'workflowRunRecorder',
+    pkg: 'workflow-run-recorder',
+    title: 'Durable workflow-run recorder',
+    mode: 'core',
     consumers: ['command-workflows', 'tool-workflow'],
-    note: 'Owns live WorkflowRun handles: session display names, background launch, journal pause/resume, stop/save, and session/workflow-runs frames.',
+    note: 'Attributes one explicit top-level supervisor launch to its parent Session and appends the logical run and member lifecycle used by the durable Chat node; nested and unattributed launches remain dashboard-only.',
   },
   {
     key: 'lsp',

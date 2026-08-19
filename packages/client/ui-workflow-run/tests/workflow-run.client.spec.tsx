@@ -140,7 +140,7 @@ describe('workflow-run Conversation Definition', () => {
     expect(workflowData(value)).toEqual(workflowData(assembler(events)))
   })
 
-  it('shows missing terminal facts as interrupted only after the owning Location closes', () => {
+  it('keeps a detached run live after its owning Location closes until terminal events arrive', () => {
     const value = assembler([
       at(1, 'turn/start', { turn: 1 }),
       at(2, 'step/start', { turn: 1, step: 1 }),
@@ -151,10 +151,27 @@ describe('workflow-run Conversation Definition', () => {
     ])
     expect(workflowData(value)?.status).toBe('running')
     value.append(at(5, 'step/end', { turn: 1, step: 1 }))
+    value.append(at(6, 'turn/end', { turn: 1, reason: { kind: 'completed' } }))
     value.flush()
     expect(workflowData(value)).toMatchObject({
-      status: 'interrupted',
-      phases: [{ members: [{ status: 'interrupted' }] }],
+      status: 'running',
+      phases: [{ members: [{ status: 'running' }] }],
+    })
+    value.append(at(7, 'tool-workflow/agent-end', {
+      runId: 'run-1', seq: 1, outcome: 'completed',
+    }))
+    value.flush()
+    expect(workflowData(value)).toMatchObject({
+      status: 'running',
+      phases: [{ members: [{ status: 'completed' }] }],
+    })
+    value.append(at(8, 'tool-workflow/run-end', {
+      runId: 'run-1', stopReason: 'completed',
+    }))
+    value.flush()
+    expect(workflowData(value)).toMatchObject({
+      status: 'completed',
+      phases: [{ members: [{ status: 'completed' }] }],
     })
   })
 
@@ -170,7 +187,7 @@ describe('workflow-run Conversation Definition', () => {
     })
   })
 
-  it('folds same-phase cancellation and a turn-level interruption', () => {
+  it('folds same-phase cancellation', () => {
     const cancelled = assembler([
       at(1, 'turn/start', { turn: 1 }),
       at(2, 'tool-workflow/run-start', { runId: 'cancelled', name: 'cancelled' }),
@@ -189,15 +206,13 @@ describe('workflow-run Conversation Definition', () => {
       phases: [{ phase: 'Research', members: [{ status: 'cancelled' }, { status: 'completed' }] }],
     })
 
-    const interruptedTurn = assembler([
-      at(1, 'turn/start', { turn: 1 }),
-      at(2, 'tool-workflow/run-start', { runId: 'turn', name: 'turn' }),
-      at(3, 'tool-workflow/agent-start', {
-        runId: 'turn', seq: 1, label: 'open', childId: 'child-1',
-      }),
-      at(4, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    const interrupted = assembler([
+      at(1, 'tool-workflow/run-start', { runId: 'interrupted', name: 'interrupted' }),
+      at(2, 'tool-workflow/run-end', { runId: 'interrupted', stopReason: 'interrupted' }),
     ])
-    expect(workflowData(interruptedTurn)?.status).toBe('interrupted')
+    expect(workflowData(interrupted)).toEqual({
+      name: 'interrupted', status: 'interrupted', phases: [],
+    })
   })
 
   it('handles session/unresolved placement and defensive Definition calls', () => {
@@ -271,13 +286,26 @@ const listState = (overrides: Partial<SessionListState> = {}): SessionListState 
   },
   current: PARENT_ID,
   phase: 'ready',
-  subagentsByParent: {},
+  subagentsByParent: {
+    [PARENT_ID]: {
+      entries: [{
+        kind: 'child', id: CHILD_ID, mode: 'one-shot', activity: 'running', hasChildren: false,
+      }],
+      parentAvailable: true,
+      state: 'ready',
+      error: null,
+    },
+  },
   jobsBySession: {},
   currentAddress: undefined,
   ...overrides,
 })
 
-function panelProps(data: WorkflowRunChatData, sessions = listState(), openSession = vi.fn()): WorkflowRunPanelProps {
+function panelProps(
+  data: WorkflowRunChatData,
+  sessions = listState(),
+  openMember = vi.fn().mockResolvedValue(true),
+): WorkflowRunPanelProps {
   return {
     node: node(data),
     sessionId: PARENT_ID,
@@ -295,7 +323,7 @@ function panelProps(data: WorkflowRunChatData, sessions = listState(), openSessi
     forkAt: () => {},
     loadImage: () => Promise.reject(new Error('unused')),
     fileMentions: () => undefined,
-    openSession,
+    openMember,
     t: makeTranslate(zh),
   }
 }
@@ -496,37 +524,66 @@ describe('WorkflowRunPanel', () => {
     expect(interruptedView.container.querySelectorAll('[data-state="warning"]')).toHaveLength(2)
   })
 
-  it('opens only a running ordinary-list subagent proven to have this parent', () => {
-    const data: WorkflowRunChatData = {
-      name: 'audit', status: 'running', phases: [phase()],
-    }
-    const openSession = vi.fn()
-    render(<WorkflowRunPanel {...panelProps(data, listState(), openSession)} />)
-    fireEvent.click(screen.getByRole('button', { name: '打开 worker' }))
-    expect(openSession).toHaveBeenCalledWith('child-1')
-  })
+  it.each(['running', 'completed', 'failed', 'cancelled', 'interrupted'] as const)(
+    'opens a catalog-proven one-shot %s member through its parent address',
+    (status) => {
+      const data: WorkflowRunChatData = {
+        name: 'audit', status: status === 'running' ? 'running' : 'completed',
+        phases: [phase({ members: [{
+          seq: 1, label: 'worker', childId: CHILD_ID, status,
+        }] })],
+      }
+      const openMember = vi.fn().mockResolvedValue(true)
+      const sessions = status === 'running' ? listState() : listState({
+        byId: {
+          ...listState().byId,
+          [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false },
+        },
+        subagentsByParent: {
+          [PARENT_ID]: {
+            ...listState().subagentsByParent[PARENT_ID]!,
+            entries: [{
+              kind: 'child', id: CHILD_ID, mode: 'one-shot', activity: 'inactive', hasChildren: false,
+            }],
+          },
+        },
+      })
+      render(<WorkflowRunPanel {...panelProps(data, sessions, openMember)} />)
+      if (status === 'completed') {
+        fireEvent.click(screen.getByRole('button', { name: /^audit/ }))
+        fireEvent.click(screen.getByRole('button', { name: /未分阶段/ }))
+      }
+      fireEvent.click(screen.getByRole('button', { name: '打开 worker' }))
+      expect(openMember).toHaveBeenCalledWith(PARENT_ID, CHILD_ID)
+    },
+  )
 
   it.each([
-    ['not in ordinary list', listState({ ids: [PARENT_ID] }), 'running'],
-    ['remote row', listState({ byId: {
-      ...listState().byId,
-      [CHILD_ID]: { ...listState().byId[CHILD_ID]!, origin: undefined },
-    } }), 'running'],
-    ['wrong parent', listState({ byId: {
-      ...listState().byId,
-      [CHILD_ID]: { ...listState().byId[CHILD_ID]!, parentId: 'other' as SessionId },
-    } }), 'running'],
-    ['list terminal', listState({ byId: {
-      ...listState().byId,
-      [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false },
-    } }), 'running'],
-    ['member terminal', listState(), 'completed'],
-  ] as const)('does not navigate when %s', (_name, sessions, memberStatus) => {
+    ['catalog absent', listState({ subagentsByParent: {} })],
+    ['catalog loading', listState({ subagentsByParent: {
+      [PARENT_ID]: { ...listState().subagentsByParent[PARENT_ID]!, state: 'loading' },
+    } })],
+    ['diagnostic row', listState({ subagentsByParent: {
+      [PARENT_ID]: {
+        ...listState().subagentsByParent[PARENT_ID]!,
+        entries: [{ kind: 'diagnostic', id: CHILD_ID, reason: 'unavailable' }],
+      },
+    } })],
+    ['continuable row', listState({ subagentsByParent: {
+      [PARENT_ID]: {
+        ...listState().subagentsByParent[PARENT_ID]!,
+        entries: [{
+          kind: 'child', id: CHILD_ID, mode: 'continuable', label: 'worker',
+          activity: 'inactive', hasChildren: false,
+        }],
+      },
+    } })],
+  ] as const)('does not navigate when %s', (_name, sessions) => {
     const data: WorkflowRunChatData = {
       name: 'audit', status: 'running',
       phases: [phase({
         members: [{
-          seq: 1, label: 'worker', childId: 'child-1' as SessionId, status: memberStatus,
+          seq: 1, label: 'worker', childId: 'child-1' as SessionId, status: 'running',
         }],
       })],
     }
@@ -537,9 +594,12 @@ describe('WorkflowRunPanel', () => {
 })
 
 class TestSessions extends Service {
-  readonly opened: SessionId[] = []
+  readonly opened: [SessionId, SessionId][] = []
   constructor(ctx: Context) { super(ctx, 'sessions') }
-  open(id: SessionId): void { this.opened.push(id) }
+  resolveAndOpenSubagent(parentId: SessionId, childId: SessionId): Promise<boolean> {
+    this.opened.push([parentId, childId])
+    return Promise.resolve(true)
+  }
 }
 
 describe('plugin lifecycle', () => {
@@ -562,8 +622,8 @@ describe('plugin lifecycle', () => {
     expect(ctx.slots.entries('conversation.chat.node')).toHaveLength(1)
     const entry = ctx.slots.entries('conversation.chat.node')[0]!
     const face = entry.inject?.() as unknown as WorkflowRunInjected
-    face.openSession(CHILD_ID)
-    expect((ctx.sessions as unknown as TestSessions).opened).toEqual([CHILD_ID])
+    await face.openMember(PARENT_ID, CHILD_ID)
+    expect((ctx.sessions as unknown as TestSessions).opened).toEqual([[PARENT_ID, CHILD_ID]])
     await fiber.dispose()
     expect(ctx.conversationEvents.entries()).toEqual([])
     expect(ctx.slots.entries('conversation.chat.node')).toEqual([])

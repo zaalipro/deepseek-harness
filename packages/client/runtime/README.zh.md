@@ -28,6 +28,10 @@ SlotRegistry 分别为 renderer 提供 `useSessions` 与 `useWorkspaces` 的裸 
 
 `indexSubagentDescendants()` 从保留的列表镜像中派生每个 parent 的后代总数与运行中后代数。它只沿不间断的 `origin: 'subagent'` 祖先链追踪，因此普通 fork 会开启独立的归属子树；遇到环时，追踪会停止但不会抛出异常，缺失的 parent 则会保留为无害的键，直至其摘要到达。
 
+`SessionRuntime.resolveAndOpenSubagent(parentSessionId, childSessionId)` 会刷新预期 parent 的权威目录，并且仅在引用的 child 仍是健康的直接 one-shot 子项时打开它。持久化功能记录通过这一路径提供已结束 child 的 transcript 链接，而不会把普通 Session 摘要当作导航权限来源。
+
+`WorkflowRunsController` 不会把工作流运行放入 `SessionListState`。每个 Session source 在首个订阅者出现前保持静止；controller 先安装一份有界列表 baseline，再只应用同 epoch 且连续的 `workflows/run-change` revision。进程 epoch 不匹配、revision 缺口、显式失效、存在后续分页 cursor 时发生变更、载体重连或排队变更溢出，都会触发重新读取首个分页，而不是推测性合并。后续分页 cursor 仍与 revision 绑定。连接代次、请求代次、abort 与 Session 移除会阻止迟到的 baseline、分页、控制和详情读取恢复旧状态。成员分页与结果、选中运行详情、日志、终态结果、工件元数据、UTF-8 工件分块、带 revision 检查的控制，以及受目录约束的子项打开，都作为生成的 `workflowRuns` Remote 上的按需方法存在，而不会累积为全局状态。
+
 `SessionListState.jobsBySession` 按 last-wins 镜像宿主的 `session/jobs` 帧，以会话为键，不需要 Session 实例。被清空的集合存为缺失的键，因此「缺失」与 `[]` 是同一种表示，消费方永远不必检测哨兵值。两处清理让它不至于比它所反映的真相活得更久：`session/subscribed` 丢弃该会话的镜像，因为新一代只为非空集合发送 baseline，被留下的列表会变成幽灵；`host/session-removed` 再丢一次，因为 owner 销毁是在 mux 流上移除记录的，而移除帧走 host 流，两者没有相对顺序。
 
 `SessionRuntime.search(query, signal)` 是基于 `session.search` RPC 的无状态单次操作。它返回经过排序的会话／snippet 对，但不会将查询条件、加载状态或错误状态写入共享 Session 列表，因此每个 UI 所有者都自行负责防抖、取消、抑制陈旧响应和回退呈现。`searchResultLimit` 将 `SESSION_SEARCH_RESULT_LIMIT`——即响应 schema 自身强制执行的上限——作为注入的呈现数据重新公开，使客户端插件无需复制该值。它是协议常量而非逐连接状态，因此连接 handle 不携带它。

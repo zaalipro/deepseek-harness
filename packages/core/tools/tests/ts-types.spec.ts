@@ -19,6 +19,7 @@ describe('jsonSchemaToTs', () => {
       [{ type: 'string', enum: ['a', 'b'], const: 'a' }, '"a"'],
       [{ oneOf: [{ type: 'string' }, { type: 'null' }] }, 'string | null'],
       [{ type: 'array', items: { type: 'number' } }, 'number[]'],
+      [{ type: 'array', items: { type: 'number' }, minItems: 1, maxItems: 8 }, 'number[]'],
       [{ type: 'array', items: { type: 'string', enum: ['x', 'y'] } }, '("x" | "y")[]'],
       [{ type: 'array' }, 'JsonValue[]'],
       [{ type: 'object' }, 'Record<string, JsonValue>'],

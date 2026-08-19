@@ -61,6 +61,9 @@ import * as ToolTodo from '@deepseek-ai/dsh-tool-todo'
 import * as ToolSubagent from '@deepseek-ai/dsh-tool-subagent'
 import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 import VmWorkflowEngine from '@deepseek-ai/dsh-workflow-worker-thread'
+import WorkflowRegistry from '@deepseek-ai/dsh-workflow-registry'
+import WorkflowRunRecorder from '@deepseek-ai/dsh-workflow-run-recorder'
+import WorkflowSupervisor from '@deepseek-ai/dsh-workflow-supervisor'
 import * as ToolRalph from '@deepseek-ai/dsh-tool-ralph'
 import * as ToolWorkflow from '@deepseek-ai/dsh-tool-workflow'
 import { githubSlug } from './verify-md-links.ts'
@@ -522,15 +525,19 @@ const TOOL_PACKAGES: ToolPackage[] = [
     pkg: '@deepseek-ai/dsh-tool-workflow',
     dir: 'tool-workflow',
     source: 'packages/workflow/tool-workflow/src/index.ts',
-    requires: ['ctx.tools', 'ctx.systemPrompt', 'ctx.workflowSupervisor', 'ctx.workflows', 'a calling Agent (exec.agent parents the script children)'],
-    writes: ['tool/call', 'tool/result'],
+    requires: ['ctx.tools', 'ctx.systemPrompt', 'ctx.workflowSupervisor', 'ctx.workflowRunRecorder', 'ctx.workflows', 'ctx.fs', 'a calling Agent (exec.agent parents the script children)'],
+    writes: ['tool/call', 'tool/result', 'tool-workflow/* events for explicitly attributed root launches'],
     async mount(ctx) {
-      // The tool injects `workflows`; boot the vm engine over a scripted
-      // subagent provider to satisfy it. The schema does not depend on which
-      // provider backs the engine.
+      // Boot the complete workflow seam over a local filesystem and scripted
+      // subagent provider. The schema does not depend on either provider.
       await ctx.plugin(SubagentRuntime)
       registerCatalogSubagentProvider(ctx, 'mock')
+      await ctx.plugin(LocalFileSystem)
       await ctx.plugin(VmWorkflowEngine, { provider: 'mock' })
+      await ctx.plugin(WorkflowRegistry, { watch: false })
+      await ctx.plugin(WorkflowSupervisor)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(WorkflowRunRecorder)
       await ctx.plugin(ToolWorkflow)
     },
   },

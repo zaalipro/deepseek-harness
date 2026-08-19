@@ -26,6 +26,23 @@ describe('parseWorkflowCommand', () => {
     }
   })
 
+  it('accepts a generated handle whose suffix extends a maximum-length definition name', () => {
+    const displayName = `${'a'.repeat(64)}-2`
+    expect(parseWorkflowCommand(`stop ${displayName}`)).toEqual({
+      kind: 'control', action: 'stop', displayName,
+    })
+  })
+
+  it('rejects missing or trailing control operands', () => {
+    expect(parseWorkflowCommand('stop').kind).toBe('malformed')
+    expect(parseWorkflowCommand('stop audit typo').kind).toBe('malformed')
+  })
+
+  it('rejects invalid and control-reserved definition names', () => {
+    expect(parseWorkflowCommand('2-a').kind).toBe('malformed')
+    expect(parseWorkflowCommand('pause {}').kind).toBe('malformed')
+  })
+
   it('parses an empty input as an empty launch (popup decoration)', () => {
     expect(parseWorkflowCommand('')).toEqual({ kind: 'empty' })
     expect(parseWorkflowCommand('   ')).toEqual({ kind: 'empty' })

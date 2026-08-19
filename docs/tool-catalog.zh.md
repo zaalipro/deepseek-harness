@@ -39,7 +39,7 @@
 | `@deepseek-ai/dsh-tool-subagent-report` | `report` | `ctx.subagents`、`ctx.systemPrompt`、`a live continuable in-process child Agent` | `tool/call`、`tool/result`、`a user-role message in the direct parent session` | - | 按可继续的进程内子级注册，而非全局注册，因此该 schema 仅在这种子级内部可见，并且不受其全局 `toolFilter` 影响。同一份贡献还会安装子级作用域的 `tool:report` 系统提示词 section，本目录不渲染该 section。面向父级的 `send_message` 工具单独安装。 |
 | `@deepseek-ai/dsh-tool-jobs` | `job_kill`、`job_list`、`job_output` | `ctx.tools`、`ctx.jobs`、`ctx.systemPrompt` | `tool/call`、`tool/result`、`user/message via agent.inject() for background completion notices` | - | 与任务种类无关的后台任务控制器：后台 bash 命令、PTY 发送和 subagent 都通过相同的 3 个工具读取、列出和终止。加载该插件会挂接控制器，从而启用生产方的 `ctx.jobs.start()`。 |
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`、`owning Agent session` | `tool/call`、`todo/write`、`tool/result` | - | todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。 |
-| `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.systemPrompt`、`ctx.workflowSupervisor`、`ctx.workflows`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result` | - | - |
+| `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.systemPrompt`、`ctx.workflowSupervisor`、`ctx.workflowRunRecorder`、`ctx.workflows`、`ctx.fs`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result`、`tool-workflow/* events for explicitly attributed root launches` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`、`web_search` | `ctx.tools`、`ctx.web`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。 |
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
@@ -1748,7 +1748,7 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
 
 脚本函数体提供以下钩子：
 
-- `agent(prompt, opts?): Promise<any>`：运行一个 subagent 直至完成。不提供 `opts.schema` 时解析为子级最终文本；提供 `opts.schema`（以对象为根、且**只能**使用 type/properties/required/additionalProperties/items/enum/const/oneOf 的 JSON Schema——不支持 pattern/format/数值边界）时解析为通过校验的对象。子级失败时解析为 `null`（可用 `.filter(Boolean)` 过滤）。其他选项：`label`（显示名）、`phase`（进度组），以及相互独立的 `provider`／`model` LLM 目标覆盖项（两者可单独提供）。任何其他选项都会明确报错。
+- `agent(prompt, opts?): Promise<any>`：运行一个 subagent 直至完成。不提供 `opts.schema` 时解析为子级最终文本；提供 `opts.schema`（以对象为根、且**只能**使用 type/properties/required/additionalProperties/items/minItems/maxItems/enum/const/oneOf 的 JSON Schema；`minItems`／`maxItems` 只能用于数组，且必须是非负整数；不支持 pattern/format/数值边界）时解析为通过校验的对象。子级失败时解析为 `null`（可用 `.filter(Boolean)` 过滤）。其他选项：`label`（显示名）、`phase`（进度组），以及相互独立的 `provider`／`model` LLM 目标覆盖项（两者可单独提供）。任何其他选项都会明确报错。
 - `parallel(items): Promise<any[]>`：并发运行零参数函数**或**作业映射 `{prompt, label?, phase?, schema?, provider?, model?}` 并等待**全部**完成（形成屏障）。失败的槽位解析为 `null`。
 - `pipeline(items, ...stages): Promise<any[]>`：让每个条目分别经过各阶段，阶段之间**没有**屏障。每个阶段接收 `(prev, item, index)`。
 - `phase(title)`：开始一个进度阶段；`log(message)`：说明进度；`args`：工具调用的 `args` 输入，原样提供。
@@ -1758,7 +1758,7 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
 
 如果误用钩子（参数错误、未知选项、不受支持的 schema、触发上限），抛出的错误**总会**终止脚本，绝不会退化为单个条目的 `null`。
 
-启动是**后台**的：调用立即返回 `{ displayName, runId, script_path, status: "started" }`；监督器拥有该运行，并在其结束时把最终报告发到对话中。并发与总 agent 上限适用；脚本没有文件系统、网络、计时器或 Node.js API——agent 负责干活，脚本只负责协调。设置 `validate_only: true` 可在不启动子代理的情况下冒烟检查一条罐头主机路径。
+启动是**后台**的：调用立即返回 `{ displayName, runId, script_path, status: "started" }`；监督器拥有该运行，并在其结束时把最终报告发到对话中。并发与总 agent 上限适用；脚本没有文件系统、网络、计时器或 Node.js API——agent 负责干活，脚本只负责协调。设置 `validate_only: true` 可在不启动子代理的情况下冒烟检查一条罐头主机路径。要恢复已暂停、等待输入或预算受限的运行，只提供 `resume_from_run_id`；预算受限运行还可选择提供更高的 `agent_budget`。
 
 
 ```json
@@ -1780,7 +1780,7 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
     "meta": {
       "type": "object",
       "description": "The workflow identity block (plain JSON — never code); required with script or a bare script_path.",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "name": {
           "type": "string",
@@ -1799,7 +1799,7 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
           "description": "Optional phase declarations matched by phase() calls.",
           "items": {
             "type": "object",
-            "additionalProperties": true,
+            "additionalProperties": false,
             "properties": {
               "title": {
                 "type": "string",

@@ -72,6 +72,14 @@ describe('read-only', () => {
     expect(existsSync(path)).toBe(false)
   })
 
+  it('denies a path-shaped no-follow write before publication', async () => {
+    const path = join(workspace, 'denied-definition.json')
+    await expect(fs.writeTextNoFollow(
+      path, {}, 'x', { kind: 'createIfAbsent' },
+    )).rejects.toMatchObject({ code: 'FS_SANDBOX_DENIED' })
+    expect(existsSync(path)).toBe(false)
+  })
+
   it('denies edit of an existing file (the content is unchanged)', async () => {
     const path = join(workspace, 'file.txt')
     await writeFile(path, 'original')
@@ -95,6 +103,21 @@ describe('workspace-write containment', () => {
     const outcome = await fs.writeText(await target(path), 'inside')
     expect(outcome.operation).toBe('create')
     expect(await readFile(path, 'utf8')).toBe('inside')
+  })
+
+  it.skipIf(process.platform === 'win32')('a no-follow write under the workspace lands', async () => {
+    const path = join(workspace, 'definition.json')
+    await fs.writeTextNoFollow(path, {}, 'inside', { kind: 'createIfAbsent' })
+    expect(await readFile(path, 'utf8')).toBe('inside')
+  })
+
+  it('a no-follow write through an existing escaped ancestor is denied', async () => {
+    await symlink(outside, join(workspace, 'linked-definitions'))
+    const path = join(workspace, 'linked-definitions', 'definition.json')
+    await expect(fs.writeTextNoFollow(
+      path, {}, 'outside', { kind: 'createIfAbsent' },
+    )).rejects.toMatchObject({ code: 'FS_SANDBOX_DENIED' })
+    expect(existsSync(join(outside, 'definition.json'))).toBe(false)
   })
 
   it('a write to the platform temp area lands (parity with the bash runner grant)', async () => {

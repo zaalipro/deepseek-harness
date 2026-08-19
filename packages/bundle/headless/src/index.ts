@@ -20,12 +20,13 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // and the cmdline Context merge for the appExit host value.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
+import type {} from '@deepseek-ai/dsh-workflow-supervisor'
 
 /** Stable Cordis plugin name. */
 export const name = 'headless-runner'
 
 /** Core services required before the one-shot turn can start. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions']
+export const inject = ['agentDefaultModel', 'agents', 'sessions', 'workflowSupervisor']
 
 /** Plugin config: the task resolved from this app's injected provider service. */
 export interface Config {
@@ -100,8 +101,9 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   const agents = ctx.get('agents')
   const defaultModel = ctx.get('agentDefaultModel')
   const sessions = ctx.get('sessions')
+  const workflowSupervisor = ctx.get('workflowSupervisor')
   // Early process shutdown can dispose the tree while settlement is pending.
-  if (agents === undefined || defaultModel === undefined || sessions === undefined) return
+  if (agents === undefined || defaultModel === undefined || sessions === undefined || workflowSupervisor === undefined) return
 
   const selection = defaultModel.currentSelection()
   // This bundle composes no preset roster, so the model-facing rows sit in the
@@ -123,6 +125,11 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
     content: [{ type: 'text', text: task }],
     source: { kind: 'user' },
   }))
+  await agent.whenIdle()
+  // A workflow tool call returns after publication. Join runnable work owned
+  // by this one-shot Agent and any completion-notice turn before reading the
+  // interval or asking the launcher to dispose its owner.
+  await workflowSupervisor.whenOwnerQuiescent(agent)
   await agent.whenIdle()
   await sessions.flush(agent.session)
   const outcome = summarize(agent.session.events, firstSeq)

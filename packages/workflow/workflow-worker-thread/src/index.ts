@@ -13,8 +13,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import WorkflowEngine, { validateMeta, WorkflowError, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
+import type { WorkflowJournalEntry } from '@deepseek-ai/dsh-workflow'
+import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import { WorkerRun } from './host.ts'
-import type { WorkerInit, WorkerLimits } from './types.ts'
+import type { WorkerHostLimits, WorkerInit, WorkerLimits } from './types.ts'
 
 export { validateMeta } from '@deepseek-ai/dsh-workflow'
 export { materializeFromRealm, MaterializeError } from './realm.ts'
@@ -33,7 +35,7 @@ export interface Config {
   provider?: string
   /** Concurrent `agent()` ceiling; `0` (the default) auto-resolves to `min(16, max(1, cores - 2))`. */
   maxConcurrentAgents?: number
-  /** Total `agent()` calls one run may start — the runaway-loop backstop (default 1000). */
+  /** Total `agent()` calls one run may start — the runaway-loop backstop (default 1024). */
   maxTotalAgents?: number
   /** Items accepted by a single `parallel()`/`pipeline()` call (default 4096). */
   maxItemsPerCall?: number
@@ -45,6 +47,24 @@ export interface Config {
    * 5000 ms); also bounds `dispose()`.
    */
   disposeGraceMs?: number
+  /** Maximum encoded bytes accepted for one worker protocol message (default 8 MiB). */
+  maxProtocolMessageBytes?: number
+  /** Maximum UTF-8 JSON bytes committed to one run's host-call journal (default 64 MiB). */
+  maxJournalBytes?: number
+  /** Maximum UTF-8 bytes accepted in one child prompt (default 1 MiB). */
+  maxChildPromptBytes?: number
+  /** Maximum UTF-8 bytes accepted in one progress event string (default 64 KiB). */
+  maxEventTextBytes?: number
+  /** Maximum scratch reads and writes admitted over one engine attempt (default 4096). */
+  scratchMaxOperations?: number
+  /** Maximum scratch reads and writes pending at once (default 64). */
+  scratchMaxPendingOperations?: number
+  /** Maximum scratch files in one run (default 64). */
+  scratchMaxFiles?: number
+  /** Maximum UTF-8 bytes in one scratch file (default 1 MiB). */
+  scratchMaxFileBytes?: number
+  /** Maximum UTF-8 bytes across one run's scratch files (default 8 MiB). */
+  scratchMaxTotalBytes?: number
 }
 
 type ResolvedConfig = Required<Config>
@@ -102,6 +122,134 @@ function resolveMaxTotalAgents(requested: number | undefined, ceiling: number): 
   return requested
 }
 
+/** Validate cumulative spend supplied by a logical-run supervisor. */
+function resolveInitialAgentSpend(
+  requested: number | undefined,
+  total: number,
+  journal: WorkflowStartRequest['journal'],
+): number {
+  const committed = journal?.filter(entry => entry.kind === 'agent').length ?? 0
+  const resolved = requested ?? committed
+  if (!Number.isSafeInteger(resolved) || resolved < committed || resolved > total) {
+    throw new WorkflowError(
+      `workflow initialAgentSpend must be a safe integer between the committed journal count (${committed}) and maxTotalAgents (${total})`,
+      'INVALID_ARGUMENT',
+    )
+  }
+  return resolved
+}
+
+/** Validate the monotonic member sequence seed supplied by a logical-run supervisor. */
+function resolveInitialAgentSeq(
+  requested: number | undefined,
+  spend: number,
+  total: number,
+  journal: WorkflowStartRequest['journal'],
+): number {
+  let journalMaximum = 0
+  for (const entry of journal ?? []) {
+    if (entry.kind !== 'agent') continue
+    journalMaximum = Math.max(journalMaximum, entry.seq)
+  }
+  const minimum = Math.max(spend, journalMaximum)
+  const resolved = requested ?? minimum
+  if (!Number.isSafeInteger(resolved)
+    || resolved < minimum
+    || resolved > Number.MAX_SAFE_INTEGER - (total - spend)) {
+    throw new WorkflowError(
+      `workflow initialAgentSeq must be a safe integer no less than prior spend or journal sequence (${minimum}) with room for the remaining logical-agent budget`,
+      'INVALID_ARGUMENT',
+    )
+  }
+  return resolved
+}
+
+/** Snapshot and validate replay data before it crosses into workerData. */
+function resolveJournal(journal: WorkflowStartRequest['journal']): readonly WorkflowJournalEntry[] | undefined {
+  if (journal === undefined) return undefined
+  let snapshot: unknown
+  try {
+    snapshot = snapshotJsonValue<unknown>(journal)
+  } catch (error: unknown) {
+    throw new WorkflowError('workflow journal must be lossless JSON data', 'JOURNAL_DIVERGENCE', { cause: error })
+  }
+  if (snapshot === undefined || !Array.isArray(snapshot)) {
+    throw new WorkflowError('workflow journal must be lossless JSON data', 'JOURNAL_DIVERGENCE')
+  }
+  const entries = snapshot as readonly unknown[]
+  const callIds = new Set<string>()
+  const agentSeqs = new Set<number>()
+  let priorOrdinal = 0
+  for (const candidate of entries) {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+      throw new WorkflowError('workflow journal entries must be objects', 'JOURNAL_DIVERGENCE')
+    }
+    const entry = candidate as Record<string, unknown>
+    const ordinal = entry.ordinal
+    if (typeof ordinal !== 'number' || !Number.isSafeInteger(ordinal) || ordinal !== priorOrdinal + 1) {
+      throw new WorkflowError('workflow journal entry ordinal must be the next positive safe integer', 'JOURNAL_DIVERGENCE')
+    }
+    priorOrdinal = ordinal
+    const callId = entry.callId
+    if (typeof callId !== 'string' || callId.length === 0 || callIds.has(callId)) {
+      throw new WorkflowError('workflow journal call identities must be non-empty and unique', 'JOURNAL_DIVERGENCE')
+    }
+    callIds.add(callId)
+    const fingerprint = entry.fingerprint
+    if (typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/u.test(fingerprint)) {
+      throw new WorkflowError('workflow journal fingerprint must be a lowercase SHA-256 digest', 'JOURNAL_DIVERGENCE')
+    }
+    switch (entry.kind) {
+      case 'agent':
+        if (Object.keys(entry).some(key => !['kind', 'ordinal', 'callId', 'fingerprint', 'seq', 'result'].includes(key))
+          || !Object.hasOwn(entry, 'result')) {
+          throw new WorkflowError('workflow agent journal fields are not recognized', 'JOURNAL_DIVERGENCE')
+        }
+        if (typeof entry.seq !== 'number' || !Number.isSafeInteger(entry.seq) || entry.seq < 1) {
+          throw new WorkflowError('workflow journal agent seq must be a positive safe integer', 'JOURNAL_DIVERGENCE')
+        }
+        if (agentSeqs.has(entry.seq)) {
+          throw new WorkflowError(`workflow journal repeats agent sequence ${entry.seq}`, 'JOURNAL_DIVERGENCE')
+        }
+        agentSeqs.add(entry.seq)
+        break
+      case 'phase':
+        if (Object.keys(entry).some(key => !['kind', 'ordinal', 'callId', 'fingerprint', 'title'].includes(key))) {
+          throw new WorkflowError('workflow phase journal fields are not recognized', 'JOURNAL_DIVERGENCE')
+        }
+        if (typeof entry.title !== 'string' || entry.title.length === 0) {
+          throw new WorkflowError('workflow phase journal title must be a non-empty string', 'JOURNAL_DIVERGENCE')
+        }
+        break
+      case 'log':
+        if (Object.keys(entry).some(key => !['kind', 'ordinal', 'callId', 'fingerprint', 'message'].includes(key))) {
+          throw new WorkflowError('workflow log journal fields are not recognized', 'JOURNAL_DIVERGENCE')
+        }
+        if (typeof entry.message !== 'string') {
+          throw new WorkflowError('workflow log journal message must be a string', 'JOURNAL_DIVERGENCE')
+        }
+        break
+      case 'scratch-read':
+        if (Object.keys(entry).some(key => !['kind', 'ordinal', 'callId', 'fingerprint', 'content'].includes(key))) {
+          throw new WorkflowError('workflow scratch-read journal fields are not recognized', 'JOURNAL_DIVERGENCE')
+        }
+        if (entry.content !== undefined && typeof entry.content !== 'string') {
+          throw new WorkflowError('workflow scratch-read journal content must be a string', 'JOURNAL_DIVERGENCE')
+        }
+        break
+      case 'scratch-write':
+      case 'await-user':
+        if (Object.keys(entry).some(key => !['kind', 'ordinal', 'callId', 'fingerprint'].includes(key))) {
+          throw new WorkflowError(`workflow ${entry.kind} journal fields are not recognized`, 'JOURNAL_DIVERGENCE')
+        }
+        break
+      default:
+        throw new WorkflowError('workflow journal entry kind is not recognized', 'JOURNAL_DIVERGENCE')
+    }
+  }
+  return entries as unknown as readonly WorkflowJournalEntry[]
+}
+
 /**
  * The worker-thread engine service. `start()` validates the script up front
  * (meta + a host-side body parse) and returns a {@link WorkflowRun} whose
@@ -114,10 +262,19 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
   static Config: z<Config> = z.object({
     provider: z.string().default('spawn'),
     maxConcurrentAgents: z.natural().default(0),
-    maxTotalAgents: z.natural().min(1).default(1000),
+    maxTotalAgents: z.natural().min(1).default(1024),
     maxItemsPerCall: z.natural().min(1).default(4096),
     syncTimeoutMs: z.natural().min(1).default(5000),
     disposeGraceMs: z.natural().default(5000),
+    maxProtocolMessageBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(8 * 1024 * 1024),
+    maxJournalBytes: z.number().step(1).min(2).max(Number.MAX_SAFE_INTEGER).default(64 * 1024 * 1024),
+    maxChildPromptBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1024 * 1024),
+    maxEventTextBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(64 * 1024),
+    scratchMaxOperations: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(4096),
+    scratchMaxPendingOperations: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(64),
+    scratchMaxFiles: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(64),
+    scratchMaxFileBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1024 * 1024),
+    scratchMaxTotalBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(8 * 1024 * 1024),
   })
 
   private readonly config: ResolvedConfig
@@ -127,6 +284,15 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
     // schemastery (static Config) has already filled the defaulted fields;
     // the assertion records that resolution, not a hidden fallback.
     this.config = config as ResolvedConfig
+    if (this.config.scratchMaxFileBytes > this.config.scratchMaxTotalBytes) {
+      throw new WorkflowError('workflow scratchMaxFileBytes cannot exceed scratchMaxTotalBytes', 'INVALID_ARGUMENT')
+    }
+    if (this.config.scratchMaxPendingOperations > this.config.scratchMaxOperations) {
+      throw new WorkflowError(
+        'workflow scratchMaxPendingOperations cannot exceed scratchMaxOperations',
+        'INVALID_ARGUMENT',
+      )
+    }
   }
 
   /**
@@ -142,8 +308,20 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
   start(request: WorkflowStartRequest): WorkflowRun {
     const meta = validateMeta(request.meta)
     assertBodyParses(request.script, meta.name)
+    const args = request.args === undefined ? undefined : snapshotJsonValue(request.args)
+    if (request.args !== undefined && args === undefined) {
+      throw new WorkflowError('workflow args must be losslessly JSON-serializable data', 'INVALID_ARGUMENT')
+    }
+    const journal = resolveJournal(request.journal)
     const subagentProvider = resolveSubagentProvider(this.ctx, this.config.provider, request.subagentProvider)
     const maxTotalAgents = resolveMaxTotalAgents(request.maxTotalAgents, this.config.maxTotalAgents)
+    const initialAgentSpend = resolveInitialAgentSpend(request.initialAgentSpend, maxTotalAgents, journal)
+    const initialAgentSeq = resolveInitialAgentSeq(
+      request.initialAgentSeq,
+      initialAgentSpend,
+      maxTotalAgents,
+      journal,
+    )
     const id = WorkflowRunId(randomUUID())
     const info: WorkflowRunInfo = { id, meta }
     const limits: WorkerLimits = {
@@ -157,8 +335,10 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
     const init: WorkerInit = {
       meta,
       body: request.script,
-      ...request.args !== undefined ? { args: request.args } : {},
-      ...request.journal !== undefined ? { journal: request.journal } : {},
+      ...args !== undefined ? { args } : {},
+      ...journal !== undefined ? { journal } : {},
+      initialAgentSpend,
+      initialAgentSeq,
       ...request.validateOnly !== undefined ? { validateOnly: request.validateOnly } : {},
       limits,
     }
@@ -185,10 +365,23 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
         agentStart: (agent) => { this.emitWorkflowEvent('workflow/agent-start', info, agent) },
         agentEnd: (agent) => { this.emitWorkflowEvent('workflow/agent-end', info, agent) },
         gate: (gate) => { this.emitWorkflowEvent('workflow/gate', info, gate) },
-        agentResult: (seq, result) => { this.emitWorkflowEvent('workflow/agent-result', info, seq, result) },
+        journalCommit: (entry) => { this.emitWorkflowEvent('workflow/journal-commit', info, entry) },
       },
       request.signal,
       request.scratchDir,
+      {
+        maxProtocolMessageBytes: this.config.maxProtocolMessageBytes,
+        maxJournalBytes: this.config.maxJournalBytes,
+        maxChildPromptBytes: this.config.maxChildPromptBytes,
+        maxEventTextBytes: this.config.maxEventTextBytes,
+        scratch: {
+          maxOperations: this.config.scratchMaxOperations,
+          maxPendingOperations: this.config.scratchMaxPendingOperations,
+          maxFiles: this.config.scratchMaxFiles,
+          maxFileBytes: this.config.scratchMaxFileBytes,
+          maxTotalBytes: this.config.scratchMaxTotalBytes,
+        },
+      } satisfies WorkerHostLimits,
     )
 
     this.emitWorkflowEvent('workflow/start', info)
@@ -198,6 +391,7 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
       this.emitWorkflowEvent('workflow/end', info, {
         stopReason: settled.stopReason,
         ...settled.error !== undefined ? { error: settled.error } : {},
+        ...settled.errorCode !== undefined ? { errorCode: settled.errorCode } : {},
         agentsStarted: settled.agentsStarted,
       })
     })

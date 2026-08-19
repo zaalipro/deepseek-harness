@@ -1,12 +1,12 @@
 import type {
-  ChatConversationViewNode, ConversationLocation, ConversationNodeContext,
-  ConversationNodeDefinition,
+  ChatConversationViewNode, ConversationNodeContext, ConversationNodeDefinition,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {
-  ToolWorkflowAgentEndData, ToolWorkflowAgentStartData,
-} from '@deepseek-ai/dsh-tool-workflow/types'
-import type { WorkflowAgentOutcome, WorkflowStopReason } from '@deepseek-ai/dsh-workflow/types'
+  WorkflowRunRecordAgentEndData,
+  WorkflowRunRecordAgentStartData,
+  WorkflowRunRecordEndData,
+} from '@deepseek-ai/dsh-workflow-run-recorder/types'
 
 /** Status shown for a workflow, phase, or member. */
 export type WorkflowRunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
@@ -41,13 +41,13 @@ declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
   }
 }
 
-interface WorkflowMemberState extends Omit<ToolWorkflowAgentStartData, 'runId'> {
-  readonly outcome?: WorkflowAgentOutcome
+interface WorkflowMemberState extends Omit<WorkflowRunRecordAgentStartData, 'runId'> {
+  readonly outcome?: WorkflowRunRecordAgentEndData['outcome']
 }
 
 interface WorkflowState {
   readonly name: string
-  readonly stopReason?: WorkflowStopReason
+  readonly stopReason?: WorkflowRunRecordEndData['stopReason']
   readonly members: readonly WorkflowMemberState[]
 }
 
@@ -60,40 +60,31 @@ export function workflowPhaseKey(phase: string | null): string {
   return phase === null ? 'missing' : `value:${phase.length}:${phase}`
 }
 
-function statusFromStopReason(stopReason: WorkflowStopReason): WorkflowRunStatus {
+function statusFromStopReason(stopReason: WorkflowRunRecordEndData['stopReason']): WorkflowRunStatus {
   switch (stopReason) {
     case 'completed': return 'completed'
     case 'cancelled': return 'cancelled'
     case 'error': return 'failed'
-    /* v8 ignore next -- WorkflowStopReason is closed and every variant is handled above. */
+    case 'interrupted': return 'interrupted'
+    /* v8 ignore next -- the logical stop-reason union is closed and every variant is handled above. */
     default: return stopReason satisfies never
   }
 }
 
-function statusFromOutcome(outcome: WorkflowAgentOutcome): WorkflowRunStatus {
+function statusFromOutcome(outcome: WorkflowRunRecordAgentEndData['outcome']): WorkflowRunStatus {
   switch (outcome) {
     case 'completed': return 'completed'
     case 'cancelled': return 'cancelled'
     case 'failed': return 'failed'
-    /* v8 ignore next -- WorkflowAgentOutcome is closed and every variant is handled above. */
+    /* v8 ignore next -- the logical member outcome union is closed and every variant is handled above. */
     default: return outcome satisfies never
   }
 }
 
-function locationClosed(location: ConversationLocation): boolean {
-  if (location.kind === 'step') {
-    return location.step.status === 'closed' || location.turn.status === 'closed'
-  }
-  return location.kind === 'turn' && location.turn.status === 'closed'
-}
-
 function projectWorkflow(
   context: ConversationNodeContext<WorkflowState>,
-  location: ConversationLocation,
 ): WorkflowRunChatData {
   const state = context.state as WorkflowState
-  const interrupted = state.stopReason === undefined
-    && locationClosed(location)
   const phases = new Map<string, { phase: string | null; members: WorkflowRunMemberData[] }>()
   for (const member of state.members) {
     const phase = member.phase === undefined ? null : member.phase
@@ -108,7 +99,7 @@ function projectWorkflow(
       label: member.label,
       childId: member.childId,
       status: member.outcome === undefined
-        ? interrupted ? 'interrupted' : 'running'
+        ? 'running'
         : statusFromOutcome(member.outcome),
     })
   }
@@ -120,13 +111,13 @@ function projectWorkflow(
   return {
     name: state.name,
     status: state.stopReason === undefined
-      ? interrupted ? 'interrupted' : 'running'
+      ? 'running'
       : statusFromStopReason(state.stopReason),
     phases: projectedPhases,
   }
 }
 
-function updateAgentStart(state: WorkflowState, data: ToolWorkflowAgentStartData): WorkflowState {
+function updateAgentStart(state: WorkflowState, data: WorkflowRunRecordAgentStartData): WorkflowState {
   const member: WorkflowMemberState = {
     seq: data.seq,
     label: data.label,
@@ -136,7 +127,7 @@ function updateAgentStart(state: WorkflowState, data: ToolWorkflowAgentStartData
   return { ...state, members: [...state.members, member] }
 }
 
-function updateAgentEnd(state: WorkflowState, data: ToolWorkflowAgentEndData): WorkflowState {
+function updateAgentEnd(state: WorkflowState, data: WorkflowRunRecordAgentEndData): WorkflowState {
   return {
     ...state,
     members: state.members.map(member => member.seq === data.seq
@@ -178,7 +169,7 @@ export const workflowRunDefinition: ConversationNodeDefinition<WorkflowState> = 
   },
   buildViewNode: (context): ChatConversationViewNode | null => {
     if (context.start === undefined) return null
-    const data = projectWorkflow(context, context.start.location)
+    const data = projectWorkflow(context)
     return {
       key: context.key,
       kind: 'workflow-run',

@@ -36,8 +36,40 @@ export interface WorkerInit {
   limits: WorkerLimits
   /** Committed host-call results replayed instead of relaunching children; omitted for a fresh start. */
   journal?: readonly WorkflowJournalEntry[]
+  /** Cumulative budget already spent by earlier attempts of this logical run. */
+  initialAgentSpend?: number
+  /** Highest member sequence issued by earlier attempts; keeps retry members distinct. */
+  initialAgentSeq?: number
   /** Smoke-check mode: canned `agent()` results, no child RPC, no journal persistence. */
   validateOnly?: boolean
+}
+
+/** Host-enforced scratch resource limits for one run. */
+export interface WorkerScratchLimits {
+  /** Maximum scratch RPCs admitted over this engine attempt. */
+  maxOperations: number
+  /** Maximum admitted scratch RPCs that may be pending at once. */
+  maxPendingOperations: number
+  /** Maximum number of scratch files. */
+  maxFiles: number
+  /** Maximum UTF-8 bytes in one scratch file. */
+  maxFileBytes: number
+  /** Maximum UTF-8 bytes across all scratch files. */
+  maxTotalBytes: number
+}
+
+/** Host-enforced bounds for worker messages and caller-controlled text. */
+export interface WorkerHostLimits {
+  /** Maximum approximate encoded bytes in one worker protocol message. */
+  maxProtocolMessageBytes: number
+  /** Maximum UTF-8 JSON-array bytes retained across replayed and new journal entries. */
+  maxJournalBytes: number
+  /** Maximum UTF-8 bytes in one child prompt. */
+  maxChildPromptBytes: number
+  /** Maximum UTF-8 bytes in one progress event string. */
+  maxEventTextBytes: number
+  /** Scratch storage limits. */
+  scratch: WorkerScratchLimits
 }
 
 /** What the worker asks the host to start for one `agent()` call (options already validated worker-side). */

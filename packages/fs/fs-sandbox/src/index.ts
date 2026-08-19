@@ -31,6 +31,7 @@
  */
 
 import { Context } from '@deepseek-ai/cordis'
+import { basename, dirname, join } from 'node:path'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import type { Config as LocalConfig } from '@deepseek-ai/dsh-fs-local'
 import { FsError } from '@deepseek-ai/dsh-fs'
@@ -89,6 +90,33 @@ export class SandboxedFileSystem extends LocalFileSystem {
     sandboxPolicy?: SandboxExecutionPolicy,
   ): Promise<FsWriteOutcome> {
     return super.writeText(await this.checkedTarget(target, sandboxPolicy), content, expected, signal)
+  }
+
+  /**
+   * Fence a path-shaped final-component no-follow write, then delegate to the
+   * local provider's guarded atomic publication.
+   * @param path - destination path; relative paths resolve against `opts.cwd`.
+   * @param opts - optional base directory for a relative path.
+   * @param content - complete UTF-8 text to publish.
+   * @param expected - required create or version guard.
+   * @param signal - aborts before publication.
+   * @param sandboxPolicy - per-call mode and workspace root; omit to use the deployment default.
+   * @returns the guarded publication outcome.
+   */
+  override async writeTextNoFollow(
+    path: string,
+    opts: { cwd?: string },
+    content: string,
+    expected: FsWriteIntent,
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsWriteOutcome> {
+    const target = await this.resolve(path, signal === undefined ? opts : { ...opts, signal })
+    const parent = await this.resolve(dirname(target.displayPath), signal === undefined ? {} : { signal })
+    const publicationPath = join(this.processPath(parent), basename(target.displayPath))
+    const publicationTarget = await this.resolve(publicationPath, signal === undefined ? {} : { signal })
+    await this.checkedTarget(publicationTarget, sandboxPolicy)
+    return super.writeTextNoFollow(publicationPath, {}, content, expected, signal)
   }
 
   /**

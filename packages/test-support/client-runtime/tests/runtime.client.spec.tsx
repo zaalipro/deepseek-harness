@@ -222,6 +222,27 @@ describe('sessions', () => {
       .toMatchObject({ displayTitle: 'renamed', running: true })
     runtime.sessions.setSubagentCatalogOpen('s2' as SessionId, true)
     await runtime.sessions.refreshSubagents('s2' as SessionId)
+    await expect(runtime.sessions.resolveAndOpenSubagent('s2' as SessionId, 's1' as SessionId))
+      .resolves.toBe(false)
+    runtime.sessions.list.update((draft) => {
+      draft.subagentsByParent = {
+        ...draft.subagentsByParent,
+        ['s2' as SessionId]: {
+          state: 'ready',
+          error: null,
+          entries: [{
+            kind: 'child', id: 's1' as SessionId, mode: 'one-shot',
+            activity: 'inactive', hasChildren: false,
+          }],
+          parentAvailable: true,
+        },
+      }
+    })
+    await expect(runtime.sessions.resolveAndOpenSubagent('s2' as SessionId, 's1' as SessionId))
+      .resolves.toBe(true)
+    expect(runtime.sessions.list.getSnapshot().currentAddress).toEqual({
+      parentSessionId: 's2', childSessionId: 's1', mode: 'one-shot',
+    })
     // The confirmed-switch write-back lands on the row it names and ignores
     // one the fixture never added, exactly as production's list upsert does.
     runtime.sessions.noteAgentPreset('s1' as SessionId, 'minimal')
@@ -243,6 +264,8 @@ describe('sessions', () => {
       { method: 'openSubagent', args: [address] },
       { method: 'setSubagentCatalogOpen', args: ['s2', true] },
       { method: 'refreshSubagents', args: ['s2'] },
+      { method: 'resolveAndOpenSubagent', args: ['s2', 's1'] },
+      { method: 'resolveAndOpenSubagent', args: ['s2', 's1'] },
       { method: 'open', args: ['s1'] },
       { method: 'clear', args: [] },
       { method: 'fork', args: [{ sessionId: 's1', atSeq: 7, increaseTitle: true }] },

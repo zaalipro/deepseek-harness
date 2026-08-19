@@ -1,0 +1,32 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "tool-call" },
+      { "type": "tool-call-delta", "index": 0, "id": "call_workflow_background", "name": "workflow", "argumentsDelta": "{\"meta\":{\"name\":\"snapshot-flow\",\"description\":\"one child for the snapshot\"},\"script\":\"phase('Run')\\nconst reply = await agent('Reply with exactly the word WF_CHILD_OK and nothing else.')\\ncomplete({ reply })\"}" },
+      { "type": "block-end", "index": 0, "block": { "type": "tool-call", "id": "call_workflow_background", "name": "workflow", "arguments": "{\"meta\":{\"name\":\"snapshot-flow\",\"description\":\"one child for the snapshot\"},\"script\":\"phase('Run')\\nconst reply = await agent('Reply with exactly the word WF_CHILD_OK and nothing else.')\\ncomplete({ reply })\"}" } },
+      { "type": "usage", "usage": { "inputTokens": 10, "outputTokens": 5 } },
+      { "type": "finish", "reason": { "kind": "tool-calls" } }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "text" },
+      { "type": "text-delta", "index": 0, "text": "WORKFLOW_LAUNCHED" },
+      { "type": "block-end", "index": 0, "block": { "type": "text", "text": "WORKFLOW_LAUNCHED" } },
+      { "type": "usage", "usage": { "inputTokens": 10, "outputTokens": 2 } },
+      { "type": "finish", "reason": { "kind": "stop" } }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "text" },
+      { "type": "text-delta", "index": 0, "text": "WORKFLOW_COMPLETION_ACK" },
+      { "type": "block-end", "index": 0, "block": { "type": "text", "text": "WORKFLOW_COMPLETION_ACK" } },
+      { "type": "usage", "usage": { "inputTokens": 10, "outputTokens": 2 } },
+      { "type": "finish", "reason": { "kind": "stop" } }
+    ]
+  }
+]

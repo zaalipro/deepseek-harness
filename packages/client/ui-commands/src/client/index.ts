@@ -1,8 +1,8 @@
 /**
  * Command UI plugin, browser half: CommandUiRuntime (`ctx.commandUi`) owning the
- * capability-keyed directory cache, the '/' command source, the client
- * contribution registry, and the per-session popupSelect controllers; the
- * popupSelect shell self-registers into conversation.input.overlay with
+ * capability-keyed directory cache, the '/' command source, client action and
+ * popupSelect contributions, and the per-session popupSelect controllers;
+ * the popupSelect shell self-registers into conversation.input.overlay with
  * per-session resolution.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
@@ -24,7 +24,8 @@ export { filterOptions, PopupSelectController } from './popup.ts'
 export type { PopupSelectDeps, PopupSpec, PopupState, TokenSegment } from './popup.ts'
 export type { PopupSelectInjected, PopupSelectViewProps } from './PopupSelectView.tsx'
 export type {
-  CommandContribution, CommandDecoration, CommandUiContract, CommandUiSpec, SelectConfirmation, SelectOption,
+  ActionCommandUiSpec, CommandContribution, CommandDecoration, CommandUiContract, CommandUiSpec,
+  PopupSelectCommandUiSpec, SelectConfirmation, SelectOption,
 } from './contract.ts'
 export type { CommandKey } from './locales.ts'
 

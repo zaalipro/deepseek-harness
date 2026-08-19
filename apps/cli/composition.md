@@ -126,6 +126,14 @@ flowchart LR
   cfg --> plugin_dsh_base_tool_subagent_report
   plugin_dsh_base_workflow_worker_thread["workflow-worker-thread<br/>@deepseek-ai/dsh-workflow-worker-thread"]
   cfg --> plugin_dsh_base_workflow_worker_thread
+  plugin_dsh_base_workflow_registry["workflow-registry<br/>@deepseek-ai/dsh-workflow-registry"]
+  cfg --> plugin_dsh_base_workflow_registry
+  plugin_dsh_base_workflow_supervisor["workflow-supervisor<br/>@deepseek-ai/dsh-workflow-supervisor"]
+  cfg --> plugin_dsh_base_workflow_supervisor
+  plugin_dsh_base_workflow_run_recorder["workflow-run-recorder<br/>@deepseek-ai/dsh-workflow-run-recorder"]
+  cfg --> plugin_dsh_base_workflow_run_recorder
+  plugin_dsh_base_workflow_user_questions["workflow-user-questions<br/>@deepseek-ai/dsh-workflow-user-questions"]
+  cfg --> plugin_dsh_base_workflow_user_questions
   plugin_dsh_base_tool_workflow["tool-workflow<br/>@deepseek-ai/dsh-tool-workflow"]
   cfg --> plugin_dsh_base_tool_workflow
   plugin_dsh_base_timeout_policy["timeout-policy<br/>@deepseek-ai/dsh-tool-call-timeout-policy"]
@@ -227,6 +235,10 @@ flowchart LR
 | `tool-subagent-fork` | `@deepseek-ai/dsh-tool-subagent` |
 | `tool-subagent-report` | `@deepseek-ai/dsh-tool-subagent-report` |
 | `workflow-worker-thread` | `@deepseek-ai/dsh-workflow-worker-thread` |
+| `workflow-registry` | `@deepseek-ai/dsh-workflow-registry` |
+| `workflow-supervisor` | `@deepseek-ai/dsh-workflow-supervisor` |
+| `workflow-run-recorder` | `@deepseek-ai/dsh-workflow-run-recorder` |
+| `workflow-user-questions` | `@deepseek-ai/dsh-workflow-user-questions` |
 | `tool-workflow` | `@deepseek-ai/dsh-tool-workflow` |
 | `timeout-policy` | `@deepseek-ai/dsh-tool-call-timeout-policy` |
 | `spill-local` | `@deepseek-ai/dsh-spill-local` |

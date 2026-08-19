@@ -1,11 +1,11 @@
 /**
  * CommandUiRuntime (`ctx.commandUi`): the '/' command source over the
  * session-keyed directory, the client-contribution registry, and the
- * per-session popupSelect controllers. Candidate synthesis merges the host
- * catalog with contributions by availability, then fuzzy query/position
- * filtering; a host/contribution name collision fails loud. Every execute
- * addresses the session's agent by sessionId — sessions are always
- * agent-backed.
+ * client action/popupSelect contribution registry, and per-session popupSelect
+ * controllers. Candidate synthesis merges the Host catalog with contributions
+ * by availability, then fuzzy query/position filtering; a Host/contribution
+ * name collision fails loud. Host execution addresses the session's agent by
+ * sessionId; client actions never enter the Host command runtime.
  */
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
@@ -18,8 +18,9 @@ import type {
   CandidateRequest, ClientSessionContext, CommandClaim, PickOutcome, InputTriggerCandidate, InputTriggerPick,
   SubmitOutcome,
 } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
-import type { CommandContribution, CommandDecoration, CommandUiContract } from './contract.ts'
-import type { CommandDescriptor } from './directory.ts'
+import type {
+  ActionCommandUiSpec, CommandContribution, CommandDecoration, CommandUiContract, PopupSelectCommandUiSpec,
+} from './contract.ts'
 import { CommandDirectory } from './directory.ts'
 import { PopupSelectController } from './popup.ts'
 import type { TokenSegment } from './popup.ts'
@@ -51,6 +52,12 @@ interface LiveState {
   readonly contributions: Map<string, CommandContribution>
   readonly decorations: Map<string, CommandDecoration>
   readonly popups: Map<SessionId, PopupSelectController<ClientSessionContext>>
+  readonly pendingActions: Map<SessionId, Map<string, PendingAction>>
+}
+
+/** One browser action admitted against an exact session-scope generation. */
+interface PendingAction {
+  readonly actx: ClientContext
 }
 
 /** One fuzzy match with its stable source position. */
@@ -72,7 +79,6 @@ function boundaryBonus(name: string, index: number): number {
  * cost weight.
  */
 function fuzzyScore(name: string, query: string): number | undefined {
-  if (query === '') return 0
   if (query.length > name.length) return undefined
   const noMatch = Number.NEGATIVE_INFINITY
   let previous = Array<number>(name.length).fill(noMatch)
@@ -85,14 +91,14 @@ function fuzzyScore(name: string, query: string): number | undefined {
     for (let index = 0; index < name.length; index++) {
       const gappedIndex = index - 2
       if (gappedIndex >= 0) {
-        const prior = previous[gappedIndex] ?? noMatch
+        const prior = previous[gappedIndex] as number
         if (prior !== noMatch) bestGapped = Math.max(bestGapped, prior + gappedIndex)
       }
       if (name.charAt(index) !== query.charAt(queryIndex)) continue
       const bonus = 1 + boundaryBonus(name, index)
-      const adjacent = index > 0 ? previous[index - 1] ?? noMatch : noMatch
+      const adjacent = index > 0 ? previous[index - 1] as number : noMatch
       if (adjacent !== noMatch) current[index] = adjacent + bonus + 4
-      if (bestGapped !== noMatch) current[index] = Math.max(current[index] ?? noMatch, bestGapped + bonus + 1 - index)
+      if (bestGapped !== noMatch) current[index] = Math.max(current[index] as number, bestGapped + bonus + 1 - index)
     }
     previous = current
   }
@@ -121,7 +127,12 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
   static inject = ['inputTriggers', 'sessions', 'remote', 'remote.commands']
 
   private readonly directory: CommandDirectory
-  private readonly live: LiveState = { contributions: new Map(), decorations: new Map(), popups: new Map() }
+  private readonly live: LiveState = {
+    contributions: new Map(),
+    decorations: new Map(),
+    popups: new Map(),
+    pendingActions: new Map(),
+  }
 
   /**
    * @param ctx - owning root context (plugin fiber; the service registers
@@ -153,6 +164,7 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     // the menu until the new one lands.
     ctx.remote.$on('agent-preset/selected', (sessionId) => { void this.directory.refresh(sessionId) })
     ctx.on('connection/reset', () => { this.directory.resetConnected() })
+    ctx.effect(() => () => { this.live.pendingActions.clear() }, 'command: pending client actions')
   }
 
   /**
@@ -261,12 +273,14 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     )
   }
 
-  /** Decision table, menu column: contribution/decorated-host → popup; host input → claim; host bare → detached execute. */
+  /** Decision table, menu column: contribution → client UI; decorated host → popup; remaining host kinds derive. */
   private dispatch(pick: InputTriggerPick): PickOutcome {
     const name = pick.candidate.name
     const contribution = this.live.contributions.get(name)
     if (contribution !== undefined && contribution.available(pick.session)) {
-      this.openPopup(name, contribution.ui, pick.session, { via: 'menu', span: pick.span })
+      const segment = { via: 'menu' as const, span: pick.span }
+      if (contribution.ui.kind === 'popupSelect') this.openPopup(name, contribution.ui, pick.session, segment)
+      else this.runAction(name, contribution.ui, pick.session, segment)
       return 'handled'
     }
     const desc = this.directory.resolve(pick.session.sessionId, name)
@@ -279,11 +293,11 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
       this.openPopup(name, decoration.ui, pick.session, { via: 'menu', span: pick.span })
       return 'handled'
     }
-    if (desc.input !== undefined) return { claim: this.leadingClaim(desc, pick.session) }
+    if (desc.input !== undefined) return { claim: this.leadingClaim(desc.name, desc.input.hint, pick.session) }
     // Menu-pick execute consumes the trigger span before the detached run
     // (scoped event; the input owns the CAS guard).
     this.consumeVia(pick.session.sessionId, { via: 'menu', span: pick.span })
-    this.runDetached(desc, pick.session, `/${name}`)
+    this.runDetached(pick.session, `/${name}`)
     return 'handled'
   }
 
@@ -294,14 +308,16 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     if (this.live.contributions.has(name)) return undefined // popup kinds never claim on space
     const desc = this.directory.resolve(session.sessionId, name)
     if (desc === undefined || desc.input === undefined) return undefined
-    return { claim: this.leadingClaim(desc, session) }
+    return { claim: this.leadingClaim(desc.name, desc.input.hint, session) }
   }
 
   /**
    * Decision table, enter column. Strong-waits the session's catalog (a
    * warmup failure rejects — never a silent downgrade). Contributions and
    * bare host commands act on the bare token only; leadingInput claims
-   * args-tolerant.
+   * args-tolerant. Every non-empty slash line settles in this command source:
+   * unknown names and arguments supplied to bare-only commands report a
+   * composer error instead of falling through to the model input sink.
    */
   private async matchEnter(session: ClientSessionContext, line: string, signal: AbortSignal): Promise<PickOutcome> {
     const trimmed = line.trim()
@@ -310,16 +326,18 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     const token = ws === -1 ? trimmed : trimmed.slice(0, ws)
     const bare = ws === -1
     const name = token.slice(1)
-    if (name === '') return undefined
+    if (name === '') return this.rejectLine(session, '/ does not name a command')
     const contribution = this.live.contributions.get(name)
     if (contribution !== undefined && contribution.available(session)) {
-      if (!bare) return undefined
-      this.openPopup(name, contribution.ui, session, { via: 'enter', token })
+      if (!bare) return this.rejectLine(session, `/${name} does not accept arguments`)
+      const segment = { via: 'enter' as const, token }
+      if (contribution.ui.kind === 'popupSelect') this.openPopup(name, contribution.ui, session, segment)
+      else this.runAction(name, contribution.ui, session, segment)
       return 'handled'
     }
     await this.directory.ensureReady(session.sessionId, signal)
     const desc = this.directory.resolve(session.sessionId, name)
-    if (desc === undefined) return undefined
+    if (desc === undefined) return this.rejectLine(session, `unknown command: /${name}`)
     // Bare enter on a decorated host command opens its popup; an argued line
     // never consults the decoration (the claim/detached paths below own it).
     if (bare) {
@@ -329,17 +347,23 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
         return 'handled'
       }
     }
-    if (desc.input !== undefined) return { claim: this.leadingClaim(desc, session) }
-    if (!bare) return undefined
+    if (desc.input !== undefined) return { claim: this.leadingClaim(desc.name, desc.input.hint, session) }
+    if (!bare) return this.rejectLine(session, `/${name} does not accept arguments`)
     this.consumeVia(session.sessionId, { via: 'enter', token })
-    this.runDetached(desc, session, trimmed)
+    this.runDetached(session, trimmed)
+    return 'handled'
+  }
+
+  /** Keep a slash-line admission failure in the command plane and retain its draft. */
+  private rejectLine(session: ClientSessionContext, text: string): 'handled' {
+    this.noticeFor(session.sessionId, 'error', text)
     return 'handled'
   }
 
   /** Open the session's popup for one contribution or decoration (menu pick / bare enter). */
   private openPopup(
     name: string,
-    ui: CommandContribution['ui'],
+    ui: PopupSelectCommandUiSpec,
     session: ClientSessionContext,
     segment: TokenSegment,
   ): void {
@@ -348,12 +372,77 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     this.popupFor(actx).open(name, ui, session, segment)
   }
 
+  /**
+   * Run one client-owned action and consume its exact triggering token only
+   * after success. Failures stay local: no Host command or Session lifecycle
+   * record exists for a browser action.
+   */
+  private runAction(
+    name: string,
+    action: ActionCommandUiSpec,
+    session: ClientSessionContext,
+    segment: TokenSegment,
+  ): void {
+    const actx = this.scopeFor(session.sessionId)
+    if (actx === undefined) return
+    let byName = this.live.pendingActions.get(session.sessionId)
+    if (byName === undefined) {
+      byName = new Map()
+      this.live.pendingActions.set(session.sessionId, byName)
+    }
+    const active = byName.get(name)
+    if (active?.actx === actx) return
+    const pending: PendingAction = { actx }
+    byName.set(name, pending)
+    const disposeScopeCleanup = actx.effect(() => () => {
+      this.releaseAction(session.sessionId, name, pending)
+    }, `command action /${name}`)
+
+    const settle = (outcome: { kind: 'success' } | { kind: 'error'; error: unknown }): void => {
+      const owned = this.releaseAction(session.sessionId, name, pending)
+      if (owned && this.scopeFor(session.sessionId) === actx) {
+        if (outcome.kind === 'success') this.consumeOn(actx, segment)
+        else this.noticeOn(actx, 'error', this.actionFailure(name, outcome.error))
+      }
+      void disposeScopeCleanup()
+    }
+    let result: void | Promise<void>
+    try {
+      result = action.run(session)
+    } catch (error) {
+      settle({ kind: 'error', error })
+      return
+    }
+    void Promise.resolve(result).then(
+      () => { settle({ kind: 'success' }) },
+      (error: unknown) => { settle({ kind: 'error', error }) },
+    )
+  }
+
+  /** Release one exact action generation without deleting a later replacement. */
+  private releaseAction(sessionId: SessionId, name: string, pending: PendingAction): boolean {
+    const byName = this.live.pendingActions.get(sessionId)
+    if (byName?.get(name) !== pending) return false
+    byName.delete(name)
+    if (byName.size === 0) this.live.pendingActions.delete(sessionId)
+    return true
+  }
+
+  /** Render an action failure without trusting an arbitrary thrown value's coercion. */
+  private actionFailure(name: string, error: unknown): string {
+    try {
+      return `/${name} failed: ${String(error)}`
+    } catch {
+      return `/${name} failed: [unrenderable thrown value]`
+    }
+  }
+
   /** Build the leadingInput claim: token `/name ` + the command.execute submit transaction. */
-  private leadingClaim(desc: CommandDescriptor, session: ClientSessionContext): CommandClaim {
-    const token = `/${desc.name} `
+  private leadingClaim(name: string, hint: string, session: ClientSessionContext): CommandClaim {
+    const token = `/${name} `
     return {
       token,
-      ...(desc.input !== undefined ? { hint: desc.input.hint } : {}),
+      hint,
       submit: (args, _actx) => this.execute(session, token + args),
     }
   }
@@ -409,11 +498,11 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
    * which never entered a handler and therefore never logged — falls back to
    * the composer notice as immediate feedback.
    */
-  private runDetached(desc: CommandDescriptor, session: ClientSessionContext, line: string): void {
+  private runDetached(session: ClientSessionContext, line: string): void {
     void this.execute(session, line).then(
       (outcome) => {
         // matched:false maps to an error outcome with no logged lifecycle.
-        if (outcome.kind === 'error') this.noticeFor(session.sessionId, 'error', outcome.text ?? `/${desc.name} failed`)
+        if (outcome.kind === 'error') this.noticeFor(session.sessionId, 'error', outcome.text as string)
       },
       (error: unknown) => {
         this.noticeFor(session.sessionId, 'error', error instanceof Error ? error.message : String(error))
@@ -425,6 +514,11 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
   private consumeVia(id: SessionId, segment: TokenSegment): void {
     const actx = this.scopeFor(id)
     if (actx === undefined) return
+    this.consumeOn(actx, segment)
+  }
+
+  /** Dispatch consumption through one already-captured session generation. */
+  private consumeOn(actx: ClientContext, segment: TokenSegment): void {
     actx.bail(actx, 'slash/input-consume-token', {
       guard: segment.via === 'menu'
         ? { kind: 'span', span: segment.span }
@@ -436,6 +530,11 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
   private noticeFor(id: SessionId, level: 'info' | 'error', text: string): void {
     const actx = this.scopeFor(id)
     if (actx === undefined) return
+    this.noticeOn(actx, level, text)
+  }
+
+  /** Publish a notice through one already-captured session generation. */
+  private noticeOn(actx: ClientContext, level: 'info' | 'error', text: string): void {
     const conversation = actx.get('conversation')
     if (conversation === undefined) return
     conversation.input.for(actx).notify(level, text)
@@ -447,8 +546,6 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
   }
 
   private sessions(): ISessions {
-    const sessions = this.ctx.get('sessions')
-    if (sessions === undefined) throw new Error('ui-commands: sessions service unavailable')
-    return sessions
+    return this.ctx.sessions
   }
 }

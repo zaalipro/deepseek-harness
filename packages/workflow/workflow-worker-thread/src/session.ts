@@ -12,6 +12,7 @@
  */
 
 import type { MessagePort } from 'node:worker_threads'
+import { WorkflowError } from '@deepseek-ai/dsh-workflow'
 import { assertNever } from '@deepseek-ai/dsh-llm'
 import { HostToWorkerType, WorkerToHostType } from './protocol.ts'
 import type { HostToWorkerMessage, WorkerToHostPayloads } from './protocol.ts'
@@ -189,14 +190,39 @@ export async function runWorkerSession(port: MessagePort, init: WorkerInit): Pro
     agentStart: (info) => { post(WorkerToHostType.AgentStart, { info }) },
     agentEnd: (info) => { post(WorkerToHostType.AgentEnd, { info }) },
     gate: (gate) => { post(WorkerToHostType.Gate, { gate }) },
-    agentResult: (seq, result) => { post(WorkerToHostType.AgentResult, { seq, result }) },
+    journalCommit: (entry) => { post(WorkerToHostType.JournalCommit, { entry }) },
   }
 
   let execution: WorkflowExecution
   try {
-    execution = new WorkflowExecution(init.meta, init.body, init.args, init.limits, observer, children, init.journal, init.validateOnly)
+    execution = new WorkflowExecution(
+      init.meta,
+      init.body,
+      init.args,
+      init.limits,
+      observer,
+      children,
+      init.journal,
+      init.validateOnly,
+      init.initialAgentSpend,
+      init.initialAgentSeq,
+    )
   } catch (error: unknown) {
-    post(WorkerToHostType.Result, { result: { value: null, stopReason: 'error', error: renderThrown(error), agentsStarted: 0 } })
+    // Constructor failure still follows the ordinary startup ordering so the
+    // strict Host state machine has no special pre-ready terminal case.
+    post(WorkerToHostType.Ready, {})
+    post(WorkerToHostType.Result, {
+      result: {
+        value: null,
+        stopReason: 'error',
+        error: renderThrown(error),
+        ...error instanceof WorkflowError ? { errorCode: error.code } : {},
+        agentsStarted: Math.max(
+          init.initialAgentSpend ?? 0,
+          init.journal?.filter(entry => entry.kind === 'agent').length ?? 0,
+        ),
+      },
+    })
     return
   }
 

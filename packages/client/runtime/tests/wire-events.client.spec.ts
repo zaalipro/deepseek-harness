@@ -13,7 +13,7 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 // key face and per-event listener signatures.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import * as RuntimeClient from '../src/client/index.ts'
-import { FakeApiClient, fakeRemote } from './fake-api.client.ts'
+import { FakeApiClient, fakeRemote, fakeWorkflowRunsRemote } from './fake-api.client.ts'
 
 /**
  * Compile-time face of `ctx.remote.$on`, asserted by type-checking this file
@@ -57,6 +57,7 @@ async function mount(): Promise<Bench> {
   // handoff, not the fan-out behind it.
   ctx.reflect.provide('remote', {
     $dispatch: (event: string, args: readonly unknown[]) => { bench.dispatched.push([event, ...args]) },
+    $on: () => () => {},
   })
   const handle: ConnectionHandle = {
     api,
@@ -75,6 +76,7 @@ async function mount(): Promise<Bench> {
   }
   ctx.reflect.provide('connection', handle)
   ctx.reflect.provide('remote.commands', fakeRemote().commands)
+  ctx.reflect.provide('remote.workflowRuns', fakeWorkflowRunsRemote())
   await ctx.plugin(RuntimeClient).await()
   return bench
 }

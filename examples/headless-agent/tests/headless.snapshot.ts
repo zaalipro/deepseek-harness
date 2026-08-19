@@ -57,6 +57,9 @@ const deepseekDefaultsConfigPath = fileURLToPath(new URL('./fixtures/deepseek-de
 const headlessOverlayPath = fileURLToPath(new URL('./fixtures/headless-profile.cordis.yml', import.meta.url))
 const headlessSessionExpected = join(snapshotsDir, 'headless-profile', 'session.expected.jsonl')
 const headlessFailureExpected = join(snapshotsDir, 'headless-profile', 'stderr.expected.txt')
+const headlessWorkflowScenarioDir = join(snapshotsDir, 'headless-workflow')
+const headlessWorkflowParentExpected = join(headlessWorkflowScenarioDir, 'parent.expected.jsonl')
+const headlessWorkflowChildExpected = join(headlessWorkflowScenarioDir, 'child.expected.jsonl')
 const cliMockLlmPluginPath = fileURLToPath(new URL('./fixtures/cli-mock-llm.ts', import.meta.url))
 const refreshing = process.env.DSH_SNAPSHOT === 'refresh'
 
@@ -249,6 +252,114 @@ describe('headless stream-json snapshots', () => {
     })
 
     expect(result.stdout).toBe('CLI tool round trip complete: CLI_TOOL_ROUND_TRIP\n')
+    expect(result.stderr).toBe('')
+  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+  it('drains a background workflow through the product headless profile command', async () => {
+    const task = 'Launch the scripted background workflow and report its completion.'
+    const result = await runLoaderSmoke({
+      label: 'product headless workflow drain snapshot',
+      tempDirPrefix: 'headless-snapshot-workflow-drain-',
+      binScript: dshBinScript,
+      configPath: headlessOverlayPath,
+      binArgs: ['--profile', 'headless', '--patch', headlessOverlayPath, task],
+      tsconfigPath,
+      env: {
+        DSH_CLI_MOCK_WORKFLOW: '1',
+        DSH_PERMISSION_MODE: 'danger-full-access',
+        DSH_TELEMETRY_DISABLED: '1',
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
+      },
+      prepare: prepareCliMockFixture,
+      inspect: async (cwd) => {
+        const logs = await persistedLogs(cwd, join(cwd, '.dsh', 'sessions'))
+        expect(logs).toHaveLength(2)
+        const parent = logs.find(log => typeof log.header.parentSession !== 'string')
+        const child = logs.find(log => typeof log.header.parentSession === 'string')
+        if (parent === undefined || child === undefined) {
+          throw new Error('the headless workflow snapshot did not persist its parent and child Sessions')
+        }
+        expect(child.header.parentSession).toBe(parent.header.id)
+
+        const context = contextFromLogs([parent.content, child.content])
+        // The private run root follows the loader-smoke workspace rather than
+        // the task Session cwd, so normalize both path roots before pinning it.
+        const workspaceContext: NormalizeContext = { sessionIds: [], cwd }
+        const normalizedParent = scrubRequestHeaders(normalizeSessionLog(
+          normalizeSessionLog(parent.content, workspaceContext),
+          context,
+        ))
+        const normalizedChild = scrubRequestHeaders(normalizeSessionLog(
+          normalizeSessionLog(child.content, workspaceContext),
+          context,
+        ))
+        if (refreshing) {
+          await mkdir(headlessWorkflowScenarioDir, { recursive: true })
+          await Promise.all([
+            writeFile(headlessWorkflowParentExpected, normalizedParent),
+            writeFile(headlessWorkflowChildExpected, normalizedChild),
+          ])
+        }
+        expect(normalizedParent).toBe(await readFile(headlessWorkflowParentExpected, 'utf8'))
+        expect(normalizedChild).toBe(await readFile(headlessWorkflowChildExpected, 'utf8'))
+        expect(normalizedChild).toContain('WF_CHILD_OK')
+
+        const records = parseJsonl(parent.content)
+        const indexes = (type: string): number[] => records.flatMap((record, index) =>
+          record.type === type ? [index] : [])
+        const starts = indexes('tool-workflow/run-start')
+        const ends = indexes('tool-workflow/run-end')
+        expect(starts).toHaveLength(1)
+        expect(ends).toHaveLength(1)
+        const start = starts[0] as number
+        const end = ends[0] as number
+        expect((records[start]?.data as JsonObject | undefined)?.runId)
+          .toBe((records[end]?.data as JsonObject | undefined)?.runId)
+
+        const launchResult = records.findIndex(record => record.type === 'tool/result'
+          && JSON.stringify(record).includes('\\"status\\":\\"started\\"'))
+        expect(launchResult).toBeGreaterThan(start)
+        expect(launchResult).toBeLessThan(end)
+
+        const notice = records.findIndex((record) => {
+          if (record.type !== 'agent/inbox/spliced') return false
+          const inserted = (record.data as JsonObject | undefined)?.inserted
+          return Array.isArray(inserted) && inserted.some((message) => {
+            if (message === null || typeof message !== 'object' || Array.isArray(message)) return false
+            const source = (message as JsonObject).source
+            return source !== null && typeof source === 'object' && !Array.isArray(source)
+              && (source as JsonObject).kind === 'plugin'
+              && (source as JsonObject).plugin === 'workflow-supervisor'
+              && (source as JsonObject).form === 'notice'
+          })
+        })
+        expect(notice).toBeGreaterThan(end)
+
+        const assistantTexts = records.flatMap((record, index) => {
+          if (record.type !== 'assistant/message') return []
+          const data = record.data as JsonObject | undefined
+          const message = data?.message as JsonObject | undefined
+          const content = message?.content
+          if (!Array.isArray(content)) return []
+          return content.flatMap(block => block !== null && typeof block === 'object' && !Array.isArray(block)
+            && (block as JsonObject).type === 'text' && typeof (block as JsonObject).text === 'string'
+            ? [{ index, text: (block as JsonObject).text, turn: data?.turn }]
+            : [])
+        })
+        const launchedReplies = assistantTexts.filter(({ text }) => text === 'WORKFLOW_LAUNCHED')
+        const acknowledgedReplies = assistantTexts.filter(({ text }) => text === 'WORKFLOW_COMPLETION_ACK')
+        expect(launchedReplies).toHaveLength(1)
+        expect(launchedReplies[0]).toMatchObject({ text: 'WORKFLOW_LAUNCHED', turn: 1 })
+        expect(acknowledgedReplies).toHaveLength(1)
+        expect(acknowledgedReplies[0]).toMatchObject({ text: 'WORKFLOW_COMPLETION_ACK', turn: 2 })
+        const launched = launchedReplies[0]
+        const acknowledged = acknowledgedReplies[0]
+        expect(launched?.index).toBeLessThan(end)
+        expect(acknowledged?.index).toBeGreaterThan(notice)
+      },
+    })
+
+    expect(result.stdout).toBe('WORKFLOW_COMPLETION_ACK\n')
     expect(result.stderr).toBe('')
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
@@ -572,7 +683,6 @@ describe('headless stream-json snapshots', () => {
     const fixtureFiles = [
       advancedSessionFixture,
       join(advancedScenarioDir, 'session.1.jsonl'),
-      join(advancedScenarioDir, 'session.2.jsonl'),
     ]
     let expectedSessions = await Promise.all(fixtureFiles.map(file => readFile(file, 'utf8')))
     let runCwd = ''
@@ -589,14 +699,13 @@ describe('headless stream-json snapshots', () => {
         DSH_SNAPSHOT_FILE: advancedSessionFixture,
         DSH_SNAPSHOT_CHILD_FILES: [
           join(advancedScenarioDir, 'session.1.jsonl'),
-          join(advancedScenarioDir, 'session.2.jsonl'),
         ].join(delimiter),
         NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
       },
       prepare: (cwd) => { runCwd = cwd },
       inspect: async (cwd) => {
         const logs = await persistedLogs(cwd)
-        expect(logs).toHaveLength(3)
+        expect(logs).toHaveLength(2)
         const parents = logs.filter(log => typeof log.header.parentSession !== 'string')
         expect(parents).toHaveLength(1)
         const parent = parents[0]

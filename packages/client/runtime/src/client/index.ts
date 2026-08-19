@@ -1,9 +1,8 @@
 /** Browser runtime services for slots, sessions, workspaces, and connection-stream delivery. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ConnectionHandle, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-// Type-only: the ctx.remote merge. Deliberately the gateway's Client half rather
-// than api-remotes': that face imports a Host-tsdown-generated artifact, and this
-// project sits in the Host build graph.
+// Type-only: the application Remote assembly's ctx.remote merge. Its generated
+// Host contracts are available before the repository Client face compiles.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { TypertContext } from '@deepseek-ai/dsh-typert-protocol'
 import type { MaybeSnapshotSelectorHook, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
@@ -15,6 +14,7 @@ import type { ConversationSnapshot } from './sessions/conversation.ts'
 import type { UseProjection } from './sessions/projection-store.ts'
 import { ConversationEventRegistry } from './conversation/event-registry.ts'
 import { ConversationViewRegistry } from './conversation/view-registry.ts'
+import { WorkflowRunsController } from './workflow-runs/controller.ts'
 
 export { isAppendSurfaceEvent, isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session/surface'
 
@@ -46,6 +46,10 @@ export type { SessionProvideChannelHost } from './sessions/provide.ts'
 export { createScope } from './agents/scope.ts'
 export type { AgentScopeHandle } from './agents/scope.ts'
 export { DirectoryBrowseError, WorkspaceCreateError, WorkspaceRuntime } from './workspaces/service.ts'
+export { WorkflowRunsController, WorkflowRunsRemoteError } from './workflow-runs/controller.ts'
+export type {
+  WorkflowRunsRemote, WorkflowRunsSnapshot,
+} from './workflow-runs/controller.ts'
 export { resolveWorkspacePath } from './workspaces/path.ts'
 // Contract only: the scope implementation and its Host transport belong to
 // dsh-client-ui-settings (see that package's settings-scope.ts).
@@ -176,11 +180,13 @@ declare module '@deepseek-ai/cordis' {
     sessions: import('./contract/sessions.ts').ISessions
     /** The outward face only; the concrete service stays inside the runtime. */
     workspaces: import('./contract/workspaces.ts').IWorkspaces
+    /** Bounded workflow-run list and on-demand detail controller. */
+    workflowRuns: import('./workflow-runs/controller.ts').WorkflowRunsController
   }
 }
 
 /** Required services: the wire handle and Client Typert registry. */
-export const inject = ['connection', 'typert', 'remote', 'remote.commands']
+export const inject = ['connection', 'typert', 'remote', 'remote.commands', 'remote.workflowRuns']
 
 /** Mounts the browser runtime services and connection stream.
  * @param ctx - Client Cordis context.
@@ -197,6 +203,15 @@ export function apply(ctx: Context): void {
     identity: candidate => sessions.scopeOf(candidate),
   })
   const workspaces = new WorkspaceRuntime(ctx, connection.api, sessions)
+  const workflowRuns = new WorkflowRunsController(
+    ctx.remote.workflowRuns,
+    (parentSessionId, childSessionId) => sessions.resolveAndOpenSubagent(parentSessionId, childSessionId),
+  )
+  ctx.reflect.provide('workflowRuns', workflowRuns, undefined)
+  ctx.effect(
+    () => ctx.remote.$on('workflows/run-change', (change) => { workflowRuns.handleChange(change) }),
+    'runtime: workflow-run change feed',
+  )
   ctx.effect(
     () => workspaces.startInitialSelection(),
     'runtime: initial Workspace selection',
@@ -213,11 +228,13 @@ export function apply(ctx: Context): void {
       // decoded frame straight to the Remote service, which fans it out to
       // `ctx.remote.$on` subscribers; no consumer reads a frame.
       const frame = envelope.payload
+      if (frame.type === 'host/session-removed') workflowRuns.removeSession(frame.sessionId)
       if (frame.type === 'host/remote-event') ctx.remote.$dispatch(frame.event, frame.args)
     },
     onConnected: () => {
       sessions.handleConnected()
       workspaces.handleConnected()
+      workflowRuns.handleConnected()
       ctx.emit('connection/reset')
     },
     onStateChange: (state) => {
@@ -226,8 +243,10 @@ export function apply(ctx: Context): void {
       // the only safe moment to drop generation-scoped interaction state.
       if (state === 'reconnecting') {
         sessions.handleDisconnected()
+        workflowRuns.handleDisconnected()
       }
     },
   })
   ctx.effect(() => () => { loop.stop() }, 'runtime: connection stream loop')
+  ctx.effect(() => () => { workflowRuns.dispose() }, 'runtime: workflow-runs controller')
 }

@@ -21,6 +21,9 @@
       "path": "../../core/agent"
     },
     {
+      "path": "../../fs/fs"
+    },
+    {
       "path": "../../core/session"
     },
     {
@@ -37,6 +40,9 @@
     },
     {
       "path": "../workflow-registry"
+    },
+    {
+      "path": "../workflow-run-recorder"
     },
     {
       "path": "../workflow-supervisor"

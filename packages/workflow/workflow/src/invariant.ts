@@ -61,10 +61,11 @@ function validateWorkflowEnd(trace: WorkflowTrace, result: WorkflowResultInfo, f
 /** Install workflow start/end and child-call pairing checks. */
 const install: InvariantInstaller = (ctx, fail) => {
   const traces = new Map<string, WorkflowTrace>()
-  const stagedStarts = new WeakSet<WorkflowRunInfo>()
-  const stagedAgentStarts = new WeakSet<WorkflowAgentInfo>()
-  const stagedAgentEnds = new WeakSet<WorkflowAgentEndInfo>()
-  const stagedEnds = new WeakSet<WorkflowResultInfo>()
+  const stagedStarts = new Set<string>()
+  const stagedAgentStarts = new Set<string>()
+  const stagedAgentEnds = new Set<string>()
+  const stagedEnds = new Set<string>()
+  const agentKey = (info: WorkflowRunInfo, seq: number): string => `${info.id}\u0000${seq}`
 
   ctx.on('internal/dispatch', (_mode, eventName, args) => {
     if (eventName === 'workflow/start') {
@@ -73,7 +74,7 @@ const install: InvariantInstaller = (ctx, fail) => {
         fail('workflow/start id, meta.name, and meta.description must be non-empty')
       }
       if (traces.has(info.id)) fail(`workflow/start repeated run id ${JSON.stringify(info.id)}`)
-      stagedStarts.add(info)
+      stagedStarts.add(info.id)
       return
     }
     if (!eventName.startsWith('workflow/')) return
@@ -85,7 +86,7 @@ const install: InvariantInstaller = (ctx, fail) => {
         fail('workflow/agent-start seq must be positive and childId must be non-empty')
       }
       if (trace.agents.has(agent.seq)) fail(`workflow/agent-start repeated seq ${agent.seq}`)
-      stagedAgentStarts.add(agent)
+      stagedAgentStarts.add(agentKey(info, agent.seq))
       return
     }
     if (eventName === 'workflow/agent-end') {
@@ -93,36 +94,36 @@ const install: InvariantInstaller = (ctx, fail) => {
       const start = trace.agents.get(agent.seq)
       if (start === undefined) return fail(`workflow/agent-end has no matching start for seq ${agent.seq}`)
       validateAgentEnd(start, agent, fail)
-      stagedAgentEnds.add(agent)
+      stagedAgentEnds.add(agentKey(info, agent.seq))
       return
     }
     if (eventName === 'workflow/end') {
       const result = args[1] as WorkflowResultInfo
       validateWorkflowEnd(trace, result, fail)
-      stagedEnds.add(result)
+      stagedEnds.add(info.id)
     }
   }, { global: true })
 
   ctx.on('workflow/start', (info) => {
-    /* v8 ignore next -- internal/dispatch stages the same run-info object */
-    if (!stagedStarts.delete(info)) return
+    /* v8 ignore next -- internal/dispatch stages every provider emission */
+    if (!stagedStarts.delete(info.id)) return
     traces.set(info.id, { meta: JSON.stringify(info.meta), agents: new Map(), starts: 0 })
   }, { global: true })
   ctx.on('workflow/agent-start', (info, agent) => {
-    /* v8 ignore next -- internal/dispatch stages the same agent object */
-    if (!stagedAgentStarts.delete(agent)) return
+    /* v8 ignore next -- internal/dispatch stages every provider emission */
+    if (!stagedAgentStarts.delete(agentKey(info, agent.seq))) return
     const trace = traceFor(traces, info, fail)
     trace.agents.set(agent.seq, agent)
     trace.starts += 1
   }, { global: true })
   ctx.on('workflow/agent-end', (info, agent) => {
-    /* v8 ignore next -- internal/dispatch stages the same agent object */
-    if (!stagedAgentEnds.delete(agent)) return
+    /* v8 ignore next -- internal/dispatch stages every provider emission */
+    if (!stagedAgentEnds.delete(agentKey(info, agent.seq))) return
     traceFor(traces, info, fail).agents.delete(agent.seq)
   }, { global: true })
-  ctx.on('workflow/end', (info, result) => {
-    /* v8 ignore next -- internal/dispatch stages the same result object */
-    if (!stagedEnds.delete(result)) return
+  ctx.on('workflow/end', (info, _result) => {
+    /* v8 ignore next -- internal/dispatch stages every provider emission */
+    if (!stagedEnds.delete(info.id)) return
     traces.delete(info.id)
   }, { global: true })
 }

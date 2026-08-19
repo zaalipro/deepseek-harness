@@ -73,6 +73,8 @@ interface FsInfo {
 
 `lstat` 是路径级、不跟随链接的元数据原语。它接收路径而不是 `FsTarget`，因为 `resolve` 会有意跟随 symlink 以产生稳定标识；需要检查信任边界的消费方可以先调用 `lstat`，在解析前拒绝 `symlink`。
 
+必须防止内容 I/O 期间替换最终组件的消费方不会组合 `lstat`、`resolve` 与 `readBytes`。它会调用 `readBytesNoFollow(path, opts, signal, maxBytes)`；该方法要求同一个提供方描述符或等价对象完成不跟随打开、普通文件验证和完整有界读取。不支持的提供方报告 `FS_IO_ERROR`，不会削弱该保证。
+
 ```ts type-equiv
 /**
  * Metadata about a path without following the final path component when it is a
@@ -114,6 +116,8 @@ interface FsDirEntry {
 ## 写入与编辑守卫（提供方约定）
 
 `writeText` 和 `editText` 的版本守卫都是可选的：省略守卫时执行无条件的裸提供方变更，提供守卫时则执行相应的条件检查。`writeText` 的守卫是 `FsWriteIntent`：`createIfAbsent` 在目标缺失时创建，目标已存在时以 `FS_NOT_OBSERVED` 拒绝；即使目标在提供方初始探测后才出现，也必须拒绝，因为发布操作本身不得替换。`replaceIfVersion` 仅在目标存在且版本匹配时替换，否则报 `FS_STALE_VERSION`。省略 `expected` 则无条件创建或覆盖。联合类型本身只包含两种有守卫的意图；「无守卫」通过省略表达，因此 write 和 edit 都使用同一个可选的 `expected` 字段。
+
+拥有路径的定义发布方改用 `writeTextNoFollow(path, opts, content, expected, signal, policy)`。它的守卫是必填的，并在提供方操作内一直保持到最终条目验证与发布。最终符号链接绝不会被跟随：发布前观察到时会遭拒绝，最后时刻的替换也只能作为目标条目被替换。无法保证这些语义的提供方报告 `FS_IO_ERROR`。
 
 ```ts type-equiv
 /**
@@ -275,7 +279,7 @@ type FsErrorCode =
 
 ## 服务与插件
 
-`FileSystem`（`ctx.fs`，abstract）拥有提供方原语：`resolve`、`processPath`、`fileUrl`、`contains`、`stat`、`lstat`、`readText`、`streamText`、`readBytes`、`listDir`、`writeText` 与 `editText`。`dsh-fs-observation-policy` **不注册服务**——它是一个通过 `fs/*` 事件门禁添加策略的插件：根据未见/缺失/存在状态对写入与编辑意图 waterfall 作出决策，并记录 `FsObservation` 值。执行器是 `dsh-tool-fs`：它通过 `ctx.fs` 读取/写入/编辑，分发 waterfall，并 emit 记录事件。下方生成的 [`ctx.fs` 小节](#ctxfs--filesystem-abstract-seam) 展示确切的 `ctx.fs` 签名。
+`FileSystem`（`ctx.fs`，abstract）拥有提供方原语：`resolve`、`processPath`、`fileUrl`、`contains`、`stat`、`lstat`、`readText`、`streamText`、`readBytes`、`readBytesNoFollow`、`listDir`、`writeText`、`writeTextNoFollow` 与 `editText`。`dsh-fs-observation-policy` **不注册服务**——它是一个通过 `fs/*` 事件门禁添加策略的插件：根据未见/缺失/存在状态对写入与编辑意图 waterfall 作出决策，并记录 `FsObservation` 值。执行器是 `dsh-tool-fs`：它通过 `ctx.fs` 读取/写入/编辑，分发 waterfall，并 emit 记录事件。下方生成的 [`ctx.fs` 小节](#ctxfs--filesystem-abstract-seam) 展示确切的 `ctx.fs` 签名。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -387,6 +391,42 @@ abstract streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterab
 abstract readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>
 
 /**
+ * Open a caller-supplied path without following its final symbolic-link
+ * component, require the opened object to be a regular file, and return its
+ * complete raw content through that same open object. Ancestor links follow
+ * the backend's normal path rules. Metadata validation and bounded content
+ * I/O must share one descriptor or equivalent provider-owned object; a
+ * provider that cannot guarantee this rejects with `FS_IO_ERROR` rather than
+ * emulating it with separate metadata and read operations.
+ * @param path - the path to open; relative paths resolve against `opts.cwd`.
+ * @param opts - `cwd` overrides the backend's default base for relative paths.
+ * @param signal - aborts before opening and between bounded reads.
+ * @param maxBytes - inclusive byte cap on the complete content.
+ * @returns the full raw content, at most `maxBytes` long.
+ */
+readBytesNoFollow( path: string, opts: { cwd?: string }, signal: AbortSignal | undefined, maxBytes: number, ): Promise<Uint8Array>
+
+/**
+ * Atomically publish complete UTF-8 text at a caller-supplied path without
+ * following its final symbolic-link component. The provider applies the
+ * required create/version guard inside this operation at publication. A
+ * final link observed before publication is rejected; one substituted after
+ * validation may be replaced as the destination path entry, but its target
+ * is never opened or mutated. Ancestor links follow the backend's normal path
+ * rules. A provider that cannot guarantee these semantics rejects with
+ * `FS_IO_ERROR` rather than composing `lstat`, `resolve`, and `writeText`.
+ * @param path - the destination path; relative paths resolve against `opts.cwd`.
+ * @param opts - `cwd` overrides the backend's default base for relative paths.
+ * @param content - the complete UTF-8 text to publish.
+ * @param expected - required guarded create or versioned replacement intent.
+ * @param signal - aborts before atomic publication takes effect.
+ * @param sandboxPolicy - the per-call mode and workspace root enforced by a
+ *   sandboxing backend; omit to leave the backend its deployment default.
+ * @returns the publication outcome and resulting version.
+ */
+writeTextNoFollow( path: string, opts: { cwd?: string }, content: string, expected: FsWriteIntent, signal?: AbortSignal, sandboxPolicy?: SandboxExecutionPolicy, ): Promise<FsWriteOutcome>
+
+/**
  * List direct children of a directory in stable name order. Returns resolved
  * child targets plus cheap metadata only; never reads file contents.
  * @param target - the resolved directory target.
@@ -427,7 +467,7 @@ abstract editText( target: FsTarget, edit: FsEditRequest, expected?: { version: 
 
 Types: [SandboxExecutionPolicy](sandbox.md)
 
-Source: [`packages/fs/fs/src/index.ts:86`](../../packages/fs/fs/src/index.ts)
+Source: [`packages/fs/fs/src/index.ts:87`](../../packages/fs/fs/src/index.ts)
 
 <a id="fs-events"></a>
 
@@ -450,7 +490,7 @@ Single-slot decision for the next FileSystem.editText. Calling `next()` yields a
 'fs/edit-intent'(target: FsTarget, actor: object | undefined, next: () => { version: FsVersion } | undefined | Promise<{ version: FsVersion } | undefined>): Promise<{ version: FsVersion } | undefined>
 ```
 
-Source: [`packages/fs/fs/src/index.ts:66`](../../packages/fs/fs/src/index.ts)
+Source: [`packages/fs/fs/src/index.ts:67`](../../packages/fs/fs/src/index.ts)
 
 <a id="fsobserved--emit"></a>
 
@@ -471,7 +511,7 @@ Record an authoritative positive or negative observation. Listeners must be sync
 'fs/observed'(target: FsTarget, observation: FsObservation, actor: object | undefined): void
 ```
 
-Source: [`packages/fs/fs/src/index.ts:76`](../../packages/fs/fs/src/index.ts)
+Source: [`packages/fs/fs/src/index.ts:77`](../../packages/fs/fs/src/index.ts)
 
 <a id="fswrite-intent--waterfall"></a>
 
@@ -491,5 +531,5 @@ Single-slot decision for the next FileSystem.writeText. Calling `next()` yields 
 'fs/write-intent'(target: FsTarget, actor: object | undefined, next: () => FsWriteIntent | undefined | Promise<FsWriteIntent | undefined>): Promise<FsWriteIntent | undefined>
 ```
 
-Source: [`packages/fs/fs/src/index.ts:58`](../../packages/fs/fs/src/index.ts)
+Source: [`packages/fs/fs/src/index.ts:59`](../../packages/fs/fs/src/index.ts)
 <!-- END GENERATED cordis-surface -->

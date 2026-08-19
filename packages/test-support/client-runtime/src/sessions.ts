@@ -184,7 +184,8 @@ export class TestSessions implements ISessions {
 
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
-    method: 'open' | 'openSubagent' | 'setSubagentCatalogOpen' | 'refreshSubagents'
+    method: 'open' | 'openSubagent' | 'resolveAndOpenSubagent'
+      | 'setSubagentCatalogOpen' | 'refreshSubagents'
       | 'clear' | 'search' | 'fork'
     args: unknown[]
   }[] = []
@@ -421,6 +422,30 @@ export class TestSessions implements ISessions {
       draft.current = address.childSessionId
       draft.currentAddress = address
     })
+  }
+
+  /**
+   * Resolve an exact one-shot child from the fixture-driven catalog snapshot.
+   * The test runtime has no Host to refresh; scenarios publish the authoritative
+   * catalog before calling this method, then observe the same guarded selection
+   * as the production service.
+   * @param parentSessionId - expected direct parent id.
+   * @param childSessionId - referenced child id.
+   * @returns whether the current fixture catalog authorized and opened the child.
+   */
+  resolveAndOpenSubagent(parentSessionId: SessionId, childSessionId: SessionId): Promise<boolean> {
+    this.calls.push({ method: 'resolveAndOpenSubagent', args: [parentSessionId, childSessionId] })
+    const catalog = this.list.getSnapshot().subagentsByParent[parentSessionId]
+    if (catalog?.state !== 'ready') return Promise.resolve(false)
+    const child = catalog.entries.find(entry => entry.kind === 'child' && entry.id === childSessionId)
+    if (child?.kind !== 'child' || child.mode !== 'one-shot') return Promise.resolve(false)
+    this.require(childSessionId)
+    const address: SubagentAddress = { parentSessionId, childSessionId, mode: 'one-shot' }
+    this.list.update((draft) => {
+      draft.current = childSessionId
+      draft.currentAddress = address
+    })
+    return Promise.resolve(true)
   }
 
   /** Resolve the current fixture's retained catalog address. */

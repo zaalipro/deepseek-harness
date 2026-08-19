@@ -469,7 +469,7 @@ Source: [`packages/code-runtime/code-runtime-worker-thread/src/index.ts:25`](../
 
 ## `@deepseek-ai/dsh-command-workflows`
 
-Requires: `commands` · `workflows` · `workflowSupervisor` · `skills`
+Requires: `agents` · `commands` · `workflows` · `workflowSupervisor` · `workflowRunRecorder` · `skills`
 
 ```ts config-catalog
 /** Plugin config (all optional). */
@@ -479,7 +479,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/workflow/command-workflows/src/index.ts:34`](../packages/workflow/command-workflows/src/index.ts)
+Source: [`packages/workflow/command-workflows/src/index.ts:53`](../packages/workflow/command-workflows/src/index.ts)
 
 <a id="deepseek-aidsh-compaction-basic"></a>
 
@@ -618,7 +618,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/fs/fs-local/src/index.ts:41`](../packages/fs/fs-local/src/index.ts)
+Source: [`packages/fs/fs-local/src/index.ts:44`](../packages/fs/fs-local/src/index.ts)
 
 <a id="deepseek-aidsh-fs-sandbox"></a>
 
@@ -638,7 +638,7 @@ export type Config = LocalConfig
 
 Depends on: [`LocalConfig`](#deepseek-aidsh-fs-local)
 
-Source: [`packages/fs/fs-sandbox/src/index.ts:49`](../packages/fs/fs-sandbox/src/index.ts)
+Source: [`packages/fs/fs-sandbox/src/index.ts:50`](../packages/fs/fs-sandbox/src/index.ts)
 
 <a id="deepseek-aidsh-goal"></a>
 
@@ -660,7 +660,7 @@ Source: [`packages/goal/goal/src/index.ts:116`](../packages/goal/goal/src/index.
 
 ## `@deepseek-ai/dsh-headless`
 
-Requires: `agentDefaultModel` · `agents` · `sessions`
+Requires: `agentDefaultModel` · `agents` · `sessions` · `workflowSupervisor`
 
 ```ts config-catalog
 /** Plugin config: the task resolved from this app's injected provider service. */
@@ -670,7 +670,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/bundle/headless/src/index.ts:31`](../packages/bundle/headless/src/index.ts)
+Source: [`packages/bundle/headless/src/index.ts:32`](../packages/bundle/headless/src/index.ts)
 
 <a id="deepseek-aidsh-hooks-claude-code"></a>
 
@@ -766,10 +766,15 @@ export interface Config {
    * @default 1024
    */
   coldBlankProbeMaxBytes?: number
+  /**
+   * Maximum distinct workflow Sessions queued before global invalidation.
+   * @default 64
+   */
+  workflowChangeQueueMaxSessions?: number
 }
 ```
 
-Source: [`packages/host/apiproxy/src/index.ts:41`](../packages/host/apiproxy/src/index.ts)
+Source: [`packages/host/apiproxy/src/index.ts:45`](../packages/host/apiproxy/src/index.ts)
 
 <a id="deepseek-aidsh-host-directory-picker-browse"></a>
 
@@ -2762,19 +2767,21 @@ Source: [`packages/web/tool-web/src/index.ts:37`](../packages/web/tool-web/src/i
 
 ## `@deepseek-ai/dsh-tool-workflow`
 
-Requires: `tools` · `systemPrompt`
+Requires: `tools` · `systemPrompt` · `workflowSupervisor` · `workflowRunRecorder` · `workflows` · `fs`
 
 ```ts config-catalog
-/** Config: the model-facing tool name plus result rendering caps. */
+/** Config: the model-facing tool name plus rendering and source-size limits. */
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
-  /** Rendered-result ceiling, in characters: a longer JSON value is truncated with a notice (default 50000). */
+  /** Rendered validate-only result ceiling in characters (default 50000). */
   maxResultChars?: number
+  /** Maximum UTF-8 bytes accepted from one inline script or `script_path` file (default 1048576). */
+  maxDefinitionBytes?: number
 }
 ```
 
-Source: [`packages/workflow/tool-workflow/src/index.ts:46`](../packages/workflow/tool-workflow/src/index.ts)
+Source: [`packages/workflow/tool-workflow/src/index.ts:56`](../packages/workflow/tool-workflow/src/index.ts)
 
 <a id="deepseek-aidsh-tools"></a>
 
@@ -3011,6 +3018,8 @@ Source: [`packages/web/web-search-perplexity/src/index.ts:32`](../packages/web/w
 
 ## `@deepseek-ai/dsh-workflow-registry`
 
+Requires: `fs`
+
 ```ts config-catalog
 /** Plugin config (all optional — `static Config` supplies the defaults). */
 export interface Config {
@@ -3022,10 +3031,20 @@ export interface Config {
   bundledDir?: string
   /** Whether chokidar watches the roots and invalidates the catalog (default true). */
   watch?: boolean
+  /** Maximum complete UTF-8 bytes in one definition envelope (default 1048576). */
+  maxDefinitionBytes?: number
+  /** Maximum matching definition files accepted from one root (default 256). */
+  maxDefinitionsPerRoot?: number
+  /** Maximum distinct project roots retained in the watcher set (default 128). */
+  watchMaxProjects?: number
+  /** Milliseconds a changed definition must remain stable before invalidation (default 200). */
+  watchStabilityThresholdMs?: number
+  /** Chokidar stability probe interval in milliseconds (default 100). */
+  watchPollIntervalMs?: number
 }
 ```
 
-Source: [`packages/workflow/workflow-registry/src/index.ts:64`](../packages/workflow/workflow-registry/src/index.ts)
+Source: [`packages/workflow/workflow-registry/src/index.ts:76`](../packages/workflow/workflow-registry/src/index.ts)
 
 <a id="deepseek-aidsh-workflow-supervisor"></a>
 
@@ -3034,20 +3053,147 @@ Source: [`packages/workflow/workflow-registry/src/index.ts:64`](../packages/work
 Requires: `workflowEngine` · `workflows`
 
 ```ts config-catalog
-/** Plugin config (all optional — `static Config` supplies the defaults). */
+/** Workflow supervisor plugin configuration. */
 export interface Config {
-  /** Whether the supervisor serves runs (default true). */
+  /**
+   * Whether the supervisor accepts new operations.
+   * @default true
+   */
   enabled?: boolean
-  /** Harness home under which run directories live. */
+  /** Harness home used to derive the default run directory; resolved through the shared Harness-home policy when omitted. */
   dshHome?: string
-  /** Default per-run logical agent budget (default 128). */
+  /**
+   * Absolute child-launch budget assigned when a launch omits one.
+   * @default 128
+   */
   defaultAgentBudget?: number
-  /** Absolute per-run logical agent budget ceiling (default 1024). */
+  /**
+   * Maximum absolute child-launch budget, including resume increases.
+   * @default 1024
+   */
   maxAgentBudget?: number
-  /** Base directory owning per-run scratch + script projections (default `<dshHome>/workflow-runs`). */
+  /** Directory containing private run directories and per-Session manifests; defaults to `<dshHome>/workflow-runs`. */
   runsRoot?: string
-  /** Default save scope when the caller does not choose (default `project`). */
+  /**
+   * Definition scope used when Save omits one.
+   * @default project
+   */
   saveScope?: WorkflowSaveScope
+  /**
+   * Maximum UTF-8 bytes in one model-visible completion notice.
+   * @default 16384
+   */
+  completionNoticeMaxBytes?: number
+  /**
+   * Completion cohorts allowed to open owner turns before claimed human input resets the count.
+   * @default 3
+   */
+  maxConsecutiveCompletionWakes?: number
+  /**
+   * Maximum serialized bytes retained for an available member or terminal result.
+   * @default 131072
+   */
+  memberOutcomeMaxBytes?: number
+  /**
+   * Maximum manifest rows retained for one Session.
+   * @default 256
+   */
+  maxRetainedRunsPerSession?: number
+  /**
+   * Maximum display-name ordinal entries retained for one Session.
+   * @default 4096
+   */
+  maxWorkflowNamesPerSession?: number
+  /**
+   * Maximum member summaries retained for one logical run.
+   * @default 2048
+   */
+  maxMembersPerRun?: number
+  /**
+   * Maximum serialized bytes in one per-Session manifest.
+   * @default 8388608
+   */
+  maxManifestBytes?: number
+  /**
+   * Maximum published plus reserved nonterminal runs for one Session.
+   * @default 64
+   */
+  maxActiveRunsPerSession?: number
+  /**
+   * Maximum published plus reserved nonterminal runs across the supervisor.
+   * @default 1024
+   */
+  maxActiveRunsGlobal?: number
+  /**
+   * Maximum log-tail lines retained for one logical run.
+   * @default 1000
+   */
+  maxLogLines?: number
+  /**
+   * Maximum UTF-8 bytes retained from one log line.
+   * @default 16384
+   */
+  maxLogLineBytes?: number
+  /**
+   * Maximum live retained log bytes for one logical run.
+   * @default 1048576
+   */
+  maxLogTotalBytes?: number
+  /**
+   * Maximum scratch artifact names retained for one logical run.
+   * @default 256
+   */
+  maxRetainedArtifactsPerRun?: number
+  /**
+   * Maximum UTF-8 bytes accepted in one scratch artifact name.
+   * @default 255
+   */
+  maxArtifactNameBytes?: number
+  /**
+   * Maximum UTF-8 bytes retained from a human-gate kind.
+   * @default 64
+   */
+  maxGateKindBytes?: number
+  /**
+   * Maximum UTF-8 bytes retained from a human-gate message.
+   * @default 4096
+   */
+  maxGateMessageBytes?: number
+  /**
+   * Maximum UTF-8 bytes read from or written to an editable script projection.
+   * @default 1048576
+   */
+  maxScriptProjectionBytes?: number
+  /**
+   * Default number of items returned by a bounded Remote page.
+   * @default 50
+   */
+  remotePageDefault?: number
+  /**
+   * Maximum number of items accepted for a bounded Remote page.
+   * @default 200
+   */
+  remotePageMax?: number
+  /**
+   * Default maximum UTF-8 bytes returned from one artifact read.
+   * @default 32768
+   */
+  artifactChunkDefaultBytes?: number
+  /**
+   * Maximum UTF-8 bytes accepted for one artifact read.
+   * @default 131072
+   */
+  artifactChunkMaxBytes?: number
+  /**
+   * Maximum UTF-8 bytes retained in each text field of a Remote head or detail.
+   * @default 4096
+   */
+  remoteHeadTextMaxBytes?: number
+  /**
+   * Maximum workflow phase declarations returned by a selected-run detail.
+   * @default 64
+   */
+  remoteDetailMaxPhases?: number
 }
 
 /** Which scope a save writes into. */
@@ -3056,7 +3202,7 @@ export type WorkflowSaveScope = Extract<WorkflowScope, 'project' | 'user'>
 
 Depends on: `WorkflowScope` (`@deepseek-ai/dsh-workflow-registry/types`)
 
-Source: [`packages/workflow/workflow-supervisor/src/index.ts:68`](../packages/workflow/workflow-supervisor/src/index.ts)
+Source: [`packages/workflow/workflow-supervisor/src/index.ts:205`](../packages/workflow/workflow-supervisor/src/index.ts)
 
 <a id="deepseek-aidsh-workflow-worker-thread"></a>
 
@@ -3071,7 +3217,7 @@ export interface Config {
   provider?: string
   /** Concurrent `agent()` ceiling; `0` (the default) auto-resolves to `min(16, max(1, cores - 2))`. */
   maxConcurrentAgents?: number
-  /** Total `agent()` calls one run may start — the runaway-loop backstop (default 1000). */
+  /** Total `agent()` calls one run may start — the runaway-loop backstop (default 1024). */
   maxTotalAgents?: number
   /** Items accepted by a single `parallel()`/`pipeline()` call (default 4096). */
   maxItemsPerCall?: number
@@ -3083,10 +3229,28 @@ export interface Config {
    * 5000 ms); also bounds `dispose()`.
    */
   disposeGraceMs?: number
+  /** Maximum encoded bytes accepted for one worker protocol message (default 8 MiB). */
+  maxProtocolMessageBytes?: number
+  /** Maximum UTF-8 JSON bytes committed to one run's host-call journal (default 64 MiB). */
+  maxJournalBytes?: number
+  /** Maximum UTF-8 bytes accepted in one child prompt (default 1 MiB). */
+  maxChildPromptBytes?: number
+  /** Maximum UTF-8 bytes accepted in one progress event string (default 64 KiB). */
+  maxEventTextBytes?: number
+  /** Maximum scratch reads and writes admitted over one engine attempt (default 4096). */
+  scratchMaxOperations?: number
+  /** Maximum scratch reads and writes pending at once (default 64). */
+  scratchMaxPendingOperations?: number
+  /** Maximum scratch files in one run (default 64). */
+  scratchMaxFiles?: number
+  /** Maximum UTF-8 bytes in one scratch file (default 1 MiB). */
+  scratchMaxFileBytes?: number
+  /** Maximum UTF-8 bytes across one run's scratch files (default 8 MiB). */
+  scratchMaxTotalBytes?: number
 }
 ```
 
-Source: [`packages/workflow/workflow-worker-thread/src/index.ts:31`](../packages/workflow/workflow-worker-thread/src/index.ts)
+Source: [`packages/workflow/workflow-worker-thread/src/index.ts:33`](../packages/workflow/workflow-worker-thread/src/index.ts)
 
 ## Loadable plugins with no config
 
@@ -3157,6 +3321,8 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-tool-cordis` — requires `tools` · `systemPrompt` · `dynamicCordisRunner` · `cordisInspect` ([`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts))
 - `@deepseek-ai/dsh-tool-subagent-control` — requires `tools` · `subagents` ([`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts))
 - `@deepseek-ai/dsh-user-questions` ([`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts))
+- `@deepseek-ai/dsh-workflow-run-recorder` — requires `workflowSupervisor` · `agents` ([`packages/workflow/workflow-run-recorder/src/index.ts`](../packages/workflow/workflow-run-recorder/src/index.ts))
+- `@deepseek-ai/dsh-workflow-user-questions` — requires `workflowSupervisor` · `userQuestions` ([`packages/workflow/workflow-user-questions/src/index.ts`](../packages/workflow/workflow-user-questions/src/index.ts))
 - `@deepseek-ai/dsh-workspace` — requires `storageDomain` · `sessionPersistence` ([`packages/workspace/workspace/src/index.ts`](../packages/workspace/workspace/src/index.ts))
 
 ## Seam packages (not directly loadable)

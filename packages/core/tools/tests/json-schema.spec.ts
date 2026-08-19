@@ -53,7 +53,7 @@ describe('the enforced raw JSON Schema subset', () => {
       { type: 'integer' },
       { type: 'boolean' },
       { type: 'null' },
-      { type: 'array', items: { type: 'string' } },
+      { type: 'array', items: { type: 'string' }, minItems: 0, maxItems: 8 },
       {
         type: 'object',
         properties: {
@@ -94,6 +94,8 @@ describe('the enforced raw JSON Schema subset', () => {
       .toEqual(['schema cannot declare both type and oneOf'])
     expect(violationsOf({ oneOf: [{ type: 'string' }, { type: 'number' }], items: {} }))
       .toEqual(['schema.items is not supported beside oneOf'])
+    expect(violationsOf({ oneOf: [{ type: 'string' }, { type: 'number' }], maxItems: 8 }))
+      .toEqual(['schema.maxItems is not supported beside oneOf'])
     expect(violationsOf({ oneOf: [{ type: 'string' }, { type: 'weird' }] })[0])
       .toContain('schema.oneOf[1].type')
     const sparse = new Array<unknown>(2)
@@ -127,14 +129,57 @@ describe('the enforced raw JSON Schema subset', () => {
       .toEqual(['schema.enum is not supported on type "object"'])
     expect(violationsOf({ type: 'array', const: null }))
       .toEqual(['schema.const is not supported on type "array"'])
-    expect(violationsOf({ properties: {}, required: [], additionalProperties: true, items: {}, enum: [], const: null }))
+    expect(violationsOf({ type: 'object', minItems: 1 }))
+      .toEqual(['schema.minItems is not supported on type "object"'])
+    expect(violationsOf({
+      properties: {},
+      required: [],
+      additionalProperties: true,
+      items: {},
+      minItems: 0,
+      maxItems: 1,
+      enum: [],
+      const: null,
+    }))
       .toEqual([
         'schema.properties requires type or oneOf',
         'schema.required requires type or oneOf',
         'schema.additionalProperties requires type or oneOf',
         'schema.items requires type or oneOf',
+        'schema.minItems requires type or oneOf',
+        'schema.maxItems requires type or oneOf',
         'schema.enum requires type or oneOf',
         'schema.const requires type or oneOf',
+      ])
+  })
+
+  it('validates inclusive array-length bounds and their ordering', () => {
+    for (const schema of [
+      { type: 'array', minItems: 0 },
+      { type: 'array', maxItems: 0 },
+      { type: 'array', minItems: 2, maxItems: 8 },
+    ]) {
+      expect(() => { assertSupportedJsonSchema(schema) }, JSON.stringify(schema)).not.toThrow()
+    }
+
+    for (const [field, value] of [
+      ['minItems', -1],
+      ['minItems', -0],
+      ['minItems', 1.5],
+      ['minItems', Number.POSITIVE_INFINITY],
+      ['maxItems', Number.NaN],
+      ['maxItems', '8'],
+      ['maxItems', undefined],
+    ] as const) {
+      expect(violationsOf({ type: 'array', [field]: value }))
+        .toEqual([`schema.${field} must be a non-negative integer`])
+    }
+    expect(violationsOf({ type: 'array', minItems: 9, maxItems: 8 }))
+      .toEqual(['schema.minItems must not exceed schema.maxItems'])
+    expect(violationsOf({ type: 'array', minItems: -1, maxItems: '8' }))
+      .toEqual([
+        'schema.minItems must be a non-negative integer',
+        'schema.maxItems must be a non-negative integer',
       ])
   })
 
@@ -381,6 +426,43 @@ describe('validateJsonSchemaValue', () => {
     expect(validateJsonSchemaValue(schema, sparse)).toEqual(['"value" must be a dense lossless JSON array'])
   })
 
+  it('enforces inclusive array-length bounds', () => {
+    const schema = asserted({ type: 'array', minItems: 2, maxItems: 3, items: { type: 'integer' } })
+    expect(validateJsonSchemaValue(schema, [1, 2])).toEqual([])
+    expect(validateJsonSchemaValue(schema, [1, 2, 3])).toEqual([])
+    expect(validateJsonSchemaValue(schema, [1])).toEqual(['"value" must contain at least 2 items'])
+    expect(validateJsonSchemaValue(schema, [1, 2, 3, 4])).toEqual(['"value" must contain at most 3 items'])
+    expect(validateJsonSchemaValue(schema, [1.5])).toEqual([
+      '"value" must contain at least 2 items',
+      '"value[0]" must be an integer',
+    ])
+  })
+
+  it('accepts and enforces the workflow findings maxItems schema', () => {
+    const schema = assertedObject({
+      type: 'object',
+      required: ['findings'],
+      properties: {
+        findings: {
+          type: 'array',
+          maxItems: 8,
+          items: {
+            type: 'object',
+            required: ['file', 'issue'],
+            properties: {
+              file: { type: 'string' },
+              issue: { type: 'string' },
+            },
+          },
+        },
+      },
+    })
+    const finding = { file: 'src/index.ts', issue: 'example' }
+    expect(validateJsonSchemaValue(schema, { findings: Array.from({ length: 8 }, () => finding) })).toEqual([])
+    expect(validateJsonSchemaValue(schema, { findings: Array.from({ length: 9 }, () => finding) }))
+      .toEqual(['"value.findings" must contain at most 8 items'])
+  })
+
   it('validates exact-one oneOf semantics, including overlap', () => {
     const disjoint = asserted({ oneOf: [{ type: 'string' }, { type: 'number' }] })
     expect(validateJsonSchemaValue(disjoint, 'x')).toEqual([])
@@ -446,6 +528,11 @@ describe('validateJsonSchemaValue', () => {
       { type: 'object', required: undefined } as unknown as JsonSchemaNode,
       {},
     )).toEqual([])
+    const inheritedArrayBounds = Object.assign(
+      Object.create({ minItems: 2, maxItems: 0 }) as JsonSchemaNode,
+      { type: 'array' as const },
+    )
+    expect(validateJsonSchemaValue(inheritedArrayBounds, [1])).toEqual([])
   })
 
   it('keeps assertNever as a forged-schema backstop', () => {

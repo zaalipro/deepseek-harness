@@ -8,7 +8,7 @@ import type { ChildResult, WorkerInit } from '../src/types.ts'
 
 /** Default limits for in-process sessions (concurrency pinned; auto is machine-derived). */
 function limits(overrides?: Partial<WorkerInit['limits']>): WorkerInit['limits'] {
-  return { maxConcurrentAgents: 8, maxTotalAgents: 1000, maxItemsPerCall: 4096, syncTimeoutMs: 5000, ...overrides }
+  return { maxConcurrentAgents: 8, maxTotalAgents: 1024, maxItemsPerCall: 4096, syncTimeoutMs: 5000, ...overrides }
 }
 
 /** Wrap a body in the minimal valid meta header (the session receives it pre-extracted). */
@@ -42,6 +42,8 @@ interface FakeHostOptions {
   go?: boolean
   /** Manual mode: do NOT auto-answer child-start at all (the test scripts the replies). */
   manual?: boolean
+  /** Shared scratch backing so a resumed attempt can observe external mutation. */
+  scratch?: Map<string, string>
 }
 
 /**
@@ -54,6 +56,7 @@ interface FakeHostOptions {
 function fakeHost(options?: FakeHostOptions): FakeHost {
   const channel = new MessageChannel()
   const messages: WorkerToHostMessage[] = []
+  const scratch = options?.scratch ?? new Map<string, string>()
   const resultGate = Promise.withResolvers<Extract<WorkerToHostMessage, { type: 'result' }>['result']>()
   let childIndex = 0
   channel.port1.on('message', (message: WorkerToHostMessage) => {
@@ -85,6 +88,19 @@ function fakeHost(options?: FakeHostOptions): FakeHost {
       case WorkerToHostType.ChildDispose:
         channel.port1.postMessage({ type: HostToWorkerType.ChildDisposed, callId: message.callId } satisfies HostToWorkerMessage)
         break
+      case WorkerToHostType.ScratchWrite:
+        scratch.set(message.name, message.content)
+        channel.port1.postMessage({ type: HostToWorkerType.ScratchWritten, callId: message.callId } satisfies HostToWorkerMessage)
+        break
+      case WorkerToHostType.ScratchRead: {
+        const content = scratch.get(message.name)
+        channel.port1.postMessage({
+          type: HostToWorkerType.ScratchReadResult,
+          callId: message.callId,
+          ...(content === undefined ? {} : { content }),
+        } satisfies HostToWorkerMessage)
+        break
+      }
       case WorkerToHostType.Result:
         resultGate.resolve(message.result)
         break
@@ -312,7 +328,7 @@ describe('runWorkerSession over an in-process MessageChannel', () => {
 
   it('a non-JSON return value fails loud as RESULT_UNSERIALIZABLE', async () => {
     const host = fakeHost()
-    void runWorkerSession(host.port, init('return { when: new Date(0) }'))
+    void runWorkerSession(host.port, init('return { value: Object.create({ inherited: true }) }'))
     const result = await host.result()
     expect(result.stopReason).toBe('error')
     expect(result.error).toContain('not plain JSON data')
@@ -327,6 +343,8 @@ describe('runWorkerSession over an in-process MessageChannel', () => {
     host.send({ type: HostToWorkerType.ChildSettled, callId: 999, result: text('ghost') })
     host.send({ type: HostToWorkerType.ChildFailed, callId: 999, rendered: 'ghost' })
     host.send({ type: HostToWorkerType.ChildDisposed, callId: 999 })
+    host.send({ type: HostToWorkerType.ScratchWritten, callId: 999 })
+    host.send({ type: HostToWorkerType.ScratchReadResult, callId: 999, content: 'ghost' })
     const result = await host.result()
     expect(result.stopReason).toBe('completed')
     expect(result.value).toBe('fine')
@@ -489,6 +507,490 @@ describe('runWorkerSession over an in-process MessageChannel', () => {
     const result = await host.result()
     expect(result.stopReason).toBe('cancelled')
     expect(host.ofType(WorkerToHostType.AgentEnd)[0]!.info.outcome).toBe('cancelled')
+    host.close()
+  })
+
+  it('a resolved child result observed after cancellation pairs a cancelled agent end', async () => {
+    const host = fakeHost({ manual: true })
+    void runWorkerSession(host.port, init("return await agent('doomed')"))
+    await vi.waitFor(() => { expect(host.ofType(WorkerToHostType.ChildStart)).toHaveLength(1) })
+    const callId = host.ofType(WorkerToHostType.ChildStart)[0]!.callId
+    host.send({ type: HostToWorkerType.ChildStarted, callId, childId: 'child-0' })
+    await vi.waitFor(() => { expect(host.ofType(WorkerToHostType.AgentStart)).toHaveLength(1) })
+    host.send({ type: HostToWorkerType.Cancel, reason: 'cancel after announcement' })
+    host.send({ type: HostToWorkerType.ChildSettled, callId, result: { output: [], stopReason: 'aborted' } })
+
+    await expect(host.result()).resolves.toMatchObject({ stopReason: 'cancelled', errorCode: 'CANCELLED' })
+    expect(host.ofType(WorkerToHostType.AgentEnd)[0]!.info.outcome).toBe('cancelled')
+    host.close()
+  })
+
+  it('writes and reads scratch content through correlated session RPCs, including a missing file', async () => {
+    const host = fakeHost()
+    void runWorkerSession(host.port, init(`
+      await write_scratch_file('report.md', 'saved')
+      return {
+        saved: await read_scratch_file('report.md'),
+        missing: (await read_scratch_file('missing')) ?? null,
+      }
+    `))
+
+    await expect(host.result()).resolves.toMatchObject({
+      value: { saved: 'saved', missing: null },
+      stopReason: 'completed',
+    })
+    expect(host.ofType(WorkerToHostType.ScratchWrite)).toHaveLength(1)
+    expect(host.ofType(WorkerToHostType.ScratchRead)).toHaveLength(2)
+    host.close()
+  })
+
+  it.each([
+    ["await write_scratch_file('../escape', 'x')", 'single component'],
+    ["await write_scratch_file('report', 1)", 'content must be a string'],
+    ["await read_scratch_file('')", 'single component'],
+    ['await read_scratch_file(1)', 'single component'],
+  ])('rejects malformed scratch hook input: %s', async (body, diagnostic) => {
+    const host = fakeHost()
+    void runWorkerSession(host.port, init(body))
+    const result = await host.result()
+    expect(result).toMatchObject({ stopReason: 'error', errorCode: 'INVALID_ARGUMENT' })
+    expect(result.error).toContain(diagnostic)
+    host.close()
+  })
+
+  it('smoke validation uses canned agent and gate results without child RPCs', async () => {
+    const host = fakeHost()
+    void runWorkerSession(host.port, {
+      ...init(`
+        const plain = await agent('plain')
+        const structured = await agent('structured', { schema: { type: 'object' } })
+        await pause('backoff', 'retry later')
+        await await_user('blocked', 'confirm')
+        return { plain, structured }
+      `),
+      validateOnly: true,
+    })
+
+    await expect(host.result()).resolves.toMatchObject({
+      value: 'would pause (back_off): retry later',
+      stopReason: 'completed',
+      agentsStarted: 2,
+    })
+    expect(host.ofType(WorkerToHostType.ChildStart)).toEqual([])
+    expect(host.ofType(WorkerToHostType.Log).map(message => message.message)).toEqual([
+      'would pause (back_off): retry later',
+    ])
+    host.close()
+  })
+
+  it('synthesizes schema-conforming validate-only results for the supported vocabulary', async () => {
+    const host = fakeHost()
+    void runWorkerSession(host.port, {
+      ...init(`
+        return await agent('structured', { schema: {
+          type: 'object',
+          required: ['findings', 'nested', 'numericChoice'],
+          properties: {
+            findings: { type: 'array', maxItems: 8, items: {
+              type: 'object', required: ['file'], properties: { file: { type: 'string' } },
+            } },
+            nested: {
+              type: 'object',
+              required: ['enabled', 'mode', 'count', 'ratio', 'nil', 'choice', 'flags'],
+              properties: {
+                enabled: { type: 'boolean' },
+                mode: { type: 'string', enum: ['strict', 'loose'] },
+                count: { type: 'integer', const: 1 },
+                ratio: { type: 'number' },
+                nil: { type: 'null' },
+                choice: { oneOf: [{ type: 'string', const: 'x' }, { type: 'boolean' }] },
+                flags: { type: 'array', minItems: 2, maxItems: 3, items: { type: 'boolean' } },
+              },
+            },
+            numericChoice: { oneOf: [{ type: 'number' }, { type: 'integer' }] },
+          },
+        } })
+      `),
+      validateOnly: true,
+    })
+
+    await expect(host.result()).resolves.toEqual({
+      value: {
+        findings: [],
+        nested: {
+          enabled: false,
+          mode: 'strict',
+          count: 1,
+          ratio: 0,
+          nil: null,
+          choice: 'x',
+          flags: [false, false],
+        },
+        numericChoice: 0.5,
+      },
+      stopReason: 'completed',
+      agentsStarted: 1,
+    })
+    expect(host.ofType(WorkerToHostType.ChildStart)).toEqual([])
+    expect(host.ofType(WorkerToHostType.JournalCommit)).toEqual([])
+    host.close()
+  })
+
+  it('makes a validate-only gate an uncatchable successful terminal', async () => {
+    const host = fakeHost()
+    void runWorkerSession(host.port, {
+      ...init(`
+        try { await await_user('user', 'confirm') } catch {}
+        log('must not execute')
+        return 'must not execute'
+      `),
+      validateOnly: true,
+    })
+
+    await expect(host.result()).resolves.toEqual({
+      value: 'would await_user (user): confirm',
+      stopReason: 'completed',
+      agentsStarted: 0,
+    })
+    expect(host.ofType(WorkerToHostType.Log).map(frame => frame.message)).toEqual([
+      'would await_user (user): confirm',
+    ])
+    host.close()
+  })
+
+  it('fails loudly when validate-only cannot synthesize an exact-one value', async () => {
+    const host = fakeHost()
+    void runWorkerSession(host.port, {
+      ...init(`return await agent('impossible', { schema: {
+        type: 'object',
+        required: ['value'],
+        properties: { value: { oneOf: [{}, {}] } },
+      } })`),
+      validateOnly: true,
+    })
+
+    await expect(host.result()).resolves.toMatchObject({
+      value: null,
+      stopReason: 'error',
+      errorCode: 'UNSUPPORTED_SCHEMA',
+      error: expect.stringContaining('could not synthesize') as unknown,
+      agentsStarted: 1,
+    })
+    host.close()
+  })
+
+  it('replays narration, agents, and scratch calls without repeating committed effects or results', async () => {
+    const scratch = new Map<string, string>()
+    const body = `
+      phase('Review')
+      log('one-time narration')
+      const priorChild = await agent('committed child')
+      await write_scratch_file('state.txt', 'original')
+      const observed = await read_scratch_file('state.txt')
+      await await_user('user', 'continue')
+      const resumedChild = await agent('new child')
+      return { observed, priorChild, resumedChild }
+    `
+    const first = fakeHost({ scratch, reply: () => text('first result') })
+    void runWorkerSession(first.port, init(body))
+    await vi.waitFor(() => { expect(first.ofType(WorkerToHostType.Gate)).toHaveLength(1) })
+    first.send({ type: HostToWorkerType.Cancel, reason: 'pause attempt' })
+    await expect(first.result()).resolves.toMatchObject({ stopReason: 'cancelled', agentsStarted: 1 })
+    const journal = first.ofType(WorkerToHostType.JournalCommit).map(frame => frame.entry)
+    expect(journal.map(entry => entry.kind)).toEqual(['phase', 'log', 'agent', 'scratch-write', 'scratch-read'])
+    first.close()
+
+    scratch.set('state.txt', 'external mutation')
+    const resumed = fakeHost({ scratch, reply: () => text('second result') })
+    void runWorkerSession(resumed.port, {
+      ...init(body),
+      journal,
+      initialAgentSpend: 1,
+      initialAgentSeq: 1,
+    })
+    await vi.waitFor(() => { expect(resumed.ofType(WorkerToHostType.Gate)).toHaveLength(1) })
+    expect(resumed.ofType(WorkerToHostType.Phase)).toEqual([])
+    expect(resumed.ofType(WorkerToHostType.Log)).toEqual([])
+    expect(resumed.ofType(WorkerToHostType.ScratchWrite)).toEqual([])
+    expect(resumed.ofType(WorkerToHostType.ScratchRead)).toEqual([])
+    expect(resumed.ofType(WorkerToHostType.AgentStart)).toEqual([])
+    resumed.send({ type: HostToWorkerType.Resume })
+
+    await expect(resumed.result()).resolves.toEqual({
+      value: { observed: 'original', priorChild: 'first result', resumedChild: 'second result' },
+      stopReason: 'completed',
+      agentsStarted: 2,
+    })
+    expect(resumed.ofType(WorkerToHostType.AgentStart)).toHaveLength(1)
+    expect(resumed.ofType(WorkerToHostType.AgentStart)[0]?.info.phase).toBe('Review')
+    expect(scratch.get('state.txt')).toBe('external mutation')
+    resumed.close()
+  })
+
+  it('does not count non-agent journal entries as logical-agent spend', async () => {
+    const body = `
+      phase('Only phase')
+      log('Only log')
+      await write_scratch_file('state.txt', 'value')
+      return await read_scratch_file('state.txt')
+    `
+    const first = fakeHost()
+    void runWorkerSession(first.port, init(body))
+    await expect(first.result()).resolves.toMatchObject({ value: 'value', agentsStarted: 0 })
+    const journal = first.ofType(WorkerToHostType.JournalCommit).map(frame => frame.entry)
+    expect(journal.map(entry => entry.kind)).toEqual(['phase', 'log', 'scratch-write', 'scratch-read'])
+    first.close()
+
+    const replay = fakeHost()
+    void runWorkerSession(replay.port, { ...init(body), journal })
+    await expect(replay.result()).resolves.toEqual({ value: 'value', stopReason: 'completed', agentsStarted: 0 })
+    expect(replay.ofType(WorkerToHostType.Phase)).toEqual([])
+    expect(replay.ofType(WorkerToHostType.Log)).toEqual([])
+    expect(replay.ofType(WorkerToHostType.ScratchWrite)).toEqual([])
+    expect(replay.ofType(WorkerToHostType.ScratchRead)).toEqual([])
+    replay.close()
+  })
+
+  it('replay skips an await_user gate that was satisfied before a later pause', async () => {
+    const body = `
+      await await_user('user', 'first gate')
+      await pause('infra', 'later gate')
+    `
+    const first = fakeHost()
+    void runWorkerSession(first.port, init(body))
+    await vi.waitFor(() => { expect(first.ofType(WorkerToHostType.Gate)).toHaveLength(1) })
+    first.send({ type: HostToWorkerType.Resume })
+    await vi.waitFor(() => { expect(first.ofType(WorkerToHostType.Gate)).toHaveLength(2) })
+    first.send({ type: HostToWorkerType.Cancel, reason: 'pause attempt' })
+    await expect(first.result()).resolves.toMatchObject({ stopReason: 'cancelled' })
+    const journal = first.ofType(WorkerToHostType.JournalCommit).map(frame => frame.entry)
+    expect(journal.map(entry => entry.kind)).toEqual(['await-user'])
+    first.close()
+
+    const replay = fakeHost()
+    void runWorkerSession(replay.port, { ...init(body), journal })
+    await vi.waitFor(() => { expect(replay.ofType(WorkerToHostType.Gate)).toHaveLength(1) })
+    expect(replay.ofType(WorkerToHostType.Gate)[0]?.gate).toEqual({
+      kind: 'infra',
+      message: 'later gate',
+      resumable: false,
+    })
+    replay.send({ type: HostToWorkerType.Cancel, reason: 'stop replay' })
+    await expect(replay.result()).resolves.toMatchObject({ stopReason: 'cancelled' })
+    replay.close()
+  })
+
+  it('rejects a resumed path that skips a committed journal call', async () => {
+    const host = fakeHost()
+    void runWorkerSession(host.port, {
+      ...init("return 'changed branch'"),
+      journal: [{
+        kind: 'log',
+        ordinal: 1,
+        callId: 'root/log:1',
+        fingerprint: '0'.repeat(64),
+        message: 'skipped',
+      }],
+    })
+
+    await expect(host.result()).resolves.toMatchObject({
+      value: null,
+      stopReason: 'error',
+      errorCode: 'JOURNAL_DIVERGENCE',
+      agentsStarted: 0,
+    })
+    host.close()
+  })
+
+  it('await_user resumes past its gate while pause re-fires until cancellation', async () => {
+    const resumable = fakeHost()
+    void runWorkerSession(resumable.port, init("await await_user('user', 'continue?'); return 'continued'"))
+    await vi.waitFor(() => { expect(resumable.ofType(WorkerToHostType.Gate)).toHaveLength(1) })
+    resumable.send({ type: HostToWorkerType.Resume })
+    await expect(resumable.result()).resolves.toMatchObject({ value: 'continued', stopReason: 'completed' })
+    resumable.close()
+
+    const repeating = fakeHost()
+    void runWorkerSession(repeating.port, init("await pause('infra', 'still blocked'); return 'unreachable'"))
+    await vi.waitFor(() => { expect(repeating.ofType(WorkerToHostType.Gate)).toHaveLength(1) })
+    repeating.send({ type: HostToWorkerType.Resume })
+    await vi.waitFor(() => { expect(repeating.ofType(WorkerToHostType.Gate)).toHaveLength(2) })
+    repeating.send({ type: HostToWorkerType.Cancel, reason: 'stop repeating gate' })
+    await expect(repeating.result()).resolves.toMatchObject({ stopReason: 'cancelled' })
+    repeating.close()
+  })
+
+  it.each([
+    ["await await_user('', '')", 'await_user() requires a non-empty kind string'],
+    ["await pause(1, '')", 'pause() requires a non-empty kind string'],
+    ["await await_user('unknown')", 'await_user() kind "unknown" is not recognized'],
+    ["await pause('unknown')", 'pause() kind "unknown" is not recognized'],
+    ["await await_user('user', 1)", 'await_user() message must be a string'],
+    ["await pause('user', 1)", 'pause() message must be a string'],
+  ])('rejects an invalid human gate: %s', async (body, diagnostic) => {
+    const host = fakeHost()
+    void runWorkerSession(host.port, init(body))
+    const result = await host.result()
+    expect(result).toMatchObject({ stopReason: 'error', errorCode: 'INVALID_ARGUMENT' })
+    expect(result.error).toContain(diagnostic)
+    host.close()
+  })
+
+  it('rejects concurrent gates inside one script', async () => {
+    const host = fakeHost()
+    void runWorkerSession(host.port, init(`
+      await Promise.all([
+        await_user('user', 'first'),
+        await_user('verification', 'second'),
+      ])
+    `))
+    await expect(host.result()).resolves.toMatchObject({
+      stopReason: 'error',
+      errorCode: 'INVALID_ARGUMENT',
+      error: expect.stringContaining('only one pause()/await_user() gate') as unknown,
+    })
+    host.close()
+  })
+
+  it.each([
+    [
+      "return await parallel([() => 'thunk', { prompt: 'job' }])",
+      'cannot mix function thunks and declarative job maps',
+    ],
+    [
+      "return await parallel([{ get prompt() { throw new Error('getter failed') } }])",
+      'must be a function or plain job map',
+    ],
+    ["return await parallel([{ prompt: '' }])", 'requires a non-empty "prompt" string'],
+  ])('rejects an invalid declarative parallel panel: %s', async (body, diagnostic) => {
+    const host = fakeHost({ reply: () => text('unexpected') })
+    void runWorkerSession(host.port, init(body))
+    const result = await host.result()
+    expect(result.stopReason).toBe('error')
+    expect(result.error).toContain(diagnostic)
+    expect(host.ofType(WorkerToHostType.ChildStart)).toEqual([])
+    host.close()
+  })
+
+  it('rejects a declarative panel whose replay fingerprint changed before launching children', async () => {
+    const first = fakeHost({ reply: () => text('first') })
+    void runWorkerSession(first.port, init("return await parallel([{ prompt: 'original' }])"))
+    await first.result()
+    const entry = first.ofType(WorkerToHostType.JournalCommit)[0]!.entry
+    first.close()
+
+    const replay = fakeHost()
+    void runWorkerSession(replay.port, {
+      ...init("return await parallel([{ prompt: 'changed' }])"),
+      journal: [entry],
+      initialAgentSpend: 1,
+      initialAgentSeq: 1,
+    })
+    await expect(replay.result()).resolves.toMatchObject({
+      stopReason: 'error',
+      errorCode: 'JOURNAL_DIVERGENCE',
+    })
+    expect(replay.ofType(WorkerToHostType.ChildStart)).toEqual([])
+    replay.close()
+  })
+
+  it('numbers journal commits by reverse parallel settlement order and replays both without children', async () => {
+    const body = 'return await parallel([{ prompt: \'first\' }, { prompt: \'second\' }])'
+    const first = fakeHost({ manual: true })
+    void runWorkerSession(first.port, init(body))
+    await vi.waitFor(() => { expect(first.ofType(WorkerToHostType.ChildStart)).toHaveLength(2) })
+    const starts = first.ofType(WorkerToHostType.ChildStart)
+    first.send({ type: HostToWorkerType.ChildStarted, callId: starts[0]!.callId, childId: 'child-first' })
+    first.send({ type: HostToWorkerType.ChildStarted, callId: starts[1]!.callId, childId: 'child-second' })
+    await vi.waitFor(() => { expect(first.ofType(WorkerToHostType.AgentStart)).toHaveLength(2) })
+    first.send({
+      type: HostToWorkerType.ChildSettled,
+      callId: starts[1]!.callId,
+      result: text('second result'),
+    })
+    await vi.waitFor(() => { expect(first.ofType(WorkerToHostType.JournalCommit)).toHaveLength(1) })
+    first.send({
+      type: HostToWorkerType.ChildSettled,
+      callId: starts[0]!.callId,
+      result: text('first result'),
+    })
+
+    await expect(first.result()).resolves.toEqual({
+      value: ['first result', 'second result'],
+      stopReason: 'completed',
+      agentsStarted: 2,
+    })
+    const journal = first.ofType(WorkerToHostType.JournalCommit).map(frame => frame.entry)
+    expect(journal.map(entry => ({ ordinal: entry.ordinal, seq: entry.kind === 'agent' ? entry.seq : null })))
+      .toEqual([{ ordinal: 1, seq: 2 }, { ordinal: 2, seq: 1 }])
+    first.close()
+
+    const replay = fakeHost()
+    void runWorkerSession(replay.port, {
+      ...init(body),
+      journal,
+      initialAgentSpend: 2,
+      initialAgentSeq: 2,
+    })
+    await expect(replay.result()).resolves.toEqual({
+      value: ['first result', 'second result'],
+      stopReason: 'completed',
+      agentsStarted: 2,
+    })
+    expect(replay.ofType(WorkerToHostType.ChildStart)).toEqual([])
+    expect(replay.ofType(WorkerToHostType.JournalCommit)).toEqual([])
+    replay.close()
+  })
+
+  const invalidJournals: NonNullable<WorkerInit['journal']>[] = [
+    [{ kind: 'log', ordinal: 2, callId: 'gap', fingerprint: '0'.repeat(64), message: 'gap' }],
+    [{ kind: 'agent', ordinal: 1, seq: 0, callId: 'a', fingerprint: '0'.repeat(64), result: null }],
+    [{ kind: 'agent', ordinal: 1, seq: 1, callId: '', fingerprint: '0'.repeat(64), result: null }],
+    [
+      { kind: 'agent', ordinal: 1, seq: 1, callId: 'a', fingerprint: '0'.repeat(64), result: null },
+      { kind: 'agent', ordinal: 2, seq: 2, callId: 'a', fingerprint: '0'.repeat(64), result: null },
+    ],
+    [
+      { kind: 'agent', ordinal: 1, seq: 1, callId: 'a', fingerprint: '0'.repeat(64), result: null },
+      { kind: 'agent', ordinal: 2, seq: 1, callId: 'b', fingerprint: '0'.repeat(64), result: null },
+    ],
+    [{ kind: 'agent', ordinal: 1, seq: 1, callId: 'a', fingerprint: 'invalid', result: null }],
+    [
+      { kind: 'log', ordinal: 2, callId: 'a', fingerprint: '0'.repeat(64), message: 'a' },
+      { kind: 'log', ordinal: 1, callId: 'b', fingerprint: '0'.repeat(64), message: 'b' },
+    ],
+  ]
+  it.each(invalidJournals.map(journal => ({ journal })))(
+    'maps an ambiguous journal to a constructor error result: $journal',
+    async ({ journal }) => {
+      const host = fakeHost()
+      await runWorkerSession(host.port, { ...init("return 'unreachable'"), journal })
+      await expect(host.result()).resolves.toMatchObject({
+        value: null,
+        stopReason: 'error',
+        error: expect.stringMatching(/journal/) as unknown,
+      })
+      host.close()
+    },
+  )
+
+  it('maps a non-WorkflowError constructor failure without inventing an error code', async () => {
+    const host = fakeHost()
+    const entry = {
+      kind: 'agent' as const,
+      ordinal: 1,
+      get seq(): number { throw new Error('journal getter exploded') },
+      callId: 'a',
+      fingerprint: '0'.repeat(64),
+      result: null,
+    }
+    await runWorkerSession(host.port, { ...init("return 'unreachable'"), journal: [entry] })
+    await expect(host.result()).resolves.toMatchObject({
+      value: null,
+      stopReason: 'error',
+      error: expect.stringContaining('Error: journal getter exploded') as unknown,
+      agentsStarted: 1,
+    })
     host.close()
   })
 

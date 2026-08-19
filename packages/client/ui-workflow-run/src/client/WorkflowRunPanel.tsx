@@ -13,7 +13,13 @@ import css from './WorkflowRunPanel.module.css'
 
 /** Navigation action injected from the plugin's own SessionRuntime access. */
 export interface WorkflowRunInjected {
-  readonly openSession: (id: SessionId) => void
+  /**
+   * Refresh and open an exact direct one-shot workflow child.
+   * @param parentSessionId - workflow owner Session.
+   * @param childSessionId - member's durable child Session reference.
+   * @returns whether the current catalog verified and opened the child.
+   */
+  readonly openMember: (parentSessionId: SessionId, childSessionId: SessionId) => Promise<boolean>
 }
 
 /** Complete keyed Chat renderer props. */
@@ -111,16 +117,15 @@ function navigableMembers(
   phases: readonly WorkflowRunPhaseData[],
   parentId: SessionId,
 ): readonly SessionId[] {
-  const ordinary = new Set(sessions.ids)
+  const catalog = sessions.subagentsByParent[parentId]
+  if (catalog?.state !== 'ready') return []
+  const healthyOneShot = new Set(catalog.entries
+    .filter(entry => entry.kind === 'child' && entry.mode === 'one-shot')
+    .map(entry => entry.id))
   const result: SessionId[] = []
   for (const phase of phases) {
     for (const member of phase.members) {
-      const summary = sessions.byId[member.childId]
-      if (member.status === 'running'
-        && ordinary.has(member.childId)
-        && summary?.origin === 'subagent'
-        && summary.parentId === parentId
-        && summary.running) {
+      if (healthyOneShot.has(member.childId)) {
         result.push(member.childId)
       }
     }
@@ -163,10 +168,11 @@ function RunHeader({ children, count, name, requiresExpansion, status, t }: {
   )
 }
 
-function MemberRow({ member, navigable, openSession, t }: {
+function MemberRow({ member, navigable, openMember, parentSessionId, t }: {
   readonly member: WorkflowRunMemberData
   readonly navigable: boolean
-  readonly openSession: WorkflowRunInjected['openSession']
+  readonly openMember: WorkflowRunInjected['openMember']
+  readonly parentSessionId: SessionId
   readonly t: WorkflowRunPanelProps['t']
 }) {
   const name = readableMember(member.label, t)
@@ -186,17 +192,18 @@ function MemberRow({ member, navigable, openSession, t }: {
       className={css.memberButton}
       data-member-status={member.status}
       aria-label={t('member.open', { name })}
-      onClick={() => { openSession(member.childId) }}
+      onClick={() => { void openMember(parentSessionId, member.childId) }}
     >
       {content}
     </button>
   )
 }
 
-function PhaseSection({ phase, navigable, openSession, t }: {
+function PhaseSection({ phase, navigable, openMember, parentSessionId, t }: {
   readonly phase: WorkflowRunPhaseData
-  readonly navigable: readonly SessionId[]
-  readonly openSession: WorkflowRunInjected['openSession']
+  readonly navigable: ReadonlySet<SessionId>
+  readonly openMember: WorkflowRunInjected['openMember']
+  readonly parentSessionId: SessionId
   readonly t: WorkflowRunPanelProps['t']
 }) {
   return (
@@ -225,8 +232,9 @@ function PhaseSection({ phase, navigable, openSession, t }: {
           <MemberRow
             key={member.seq}
             member={member}
-            navigable={navigable.includes(member.childId)}
-            openSession={openSession}
+            navigable={navigable.has(member.childId)}
+            openMember={openMember}
+            parentSessionId={parentSessionId}
             t={t}
           />
         ))}
@@ -236,14 +244,15 @@ function PhaseSection({ phase, navigable, openSession, t }: {
 }
 
 /** Render one durable workflow run with status-driven run and phase disclosure. */
-export function WorkflowRunPanel({ node, sessionId, useSessions, openSession, t }: WorkflowRunPanelProps) {
+export function WorkflowRunPanel({ node, sessionId, useSessions, openMember, t }: WorkflowRunPanelProps) {
   const totalMembers = node.data.phases.reduce((count, phase) => count + phase.members.length, 0)
   const requiresExpansion = node.data.status !== 'completed'
     || node.data.phases.some(phaseRequiresExpansion)
-  const navigable = useSessions(
+  const navigableMembersForRun = useSessions(
     sessions => navigableMembers(sessions, node.data.phases, sessionId),
     shallowEqual,
   )
+  const navigable = new Set(navigableMembersForRun)
   return (
     <section className={css.root} data-workflow-run data-run-status={node.data.status}>
       <RunHeader
@@ -261,7 +270,8 @@ export function WorkflowRunPanel({ node, sessionId, useSessions, openSession, t 
                 key={phase.key}
                 phase={phase}
                 navigable={navigable}
-                openSession={openSession}
+                openMember={openMember}
+                parentSessionId={sessionId}
                 t={t}
               />
             ))}

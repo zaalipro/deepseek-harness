@@ -2,30 +2,31 @@
 
 [English](README.md) | 中文
 
-面向模型的 **`workflow` 工具**：运行一段扇出 subagent 的 JavaScript 编排脚本，并返回脚本的最终值。本包负责基于 [`ctx.workflowEngine`](../workflow/README.md) 定义面向模型的 schema 和运行生命周期；脚本解析、执行、上限与取消位于 seam 之后，消费方仍负责面向父级的 schema 和结果包络。
+面向模型的 **`workflow` 工具**通过 `ctx.workflowSupervisor` 启动 JavaScript 编排脚本。本包负责面向模型的 schema、来源解析与即时启动结果。它将根启动归因给 [`ctx.workflowRunRecorder`](../workflow-run-recorder/README.md)，由这个与来源无关的 recorder 负责顶层运行在 Chat 中的持久投影。定义发现、后台执行、暂停／恢复、上限、保留结果与完成通知仍位于[工作流能力](../workflow/README.md)之后。
 
 ## 模型看到的内容
 
-工具有三个参数：`meta`（必需的身份数据：`name`、`description` 和可选的进度注解）、`script`（必需的纯 JavaScript 脚本体，不含 `export const meta` 语句；工具描述包含完整的编写约定）以及 `args`（可选 JSON 对象，作为全局变量 `args` 向脚本公开；裸列表应包装到字段中，使协议 schema 如实表达形态）。插件还会贡献一个 `tool:<toolName>` 系统提示词段，其中包含使用策略：只有用户明确要求工作流／大型编排时才使用该工具；一两项委派优先使用普通 subagent 调用。这遵循工具指导随工具插件交付、绝不放入部署 persona 的约定。
+启动必须且只能提供一个来源：`name` 表示已保存定义，`script` 加 `meta` 表示内联纯 JavaScript 脚本体，`script_path` 表示定义包络或可编辑脚本。已保存名称和相对文件路径基于调用 Session 的 `cwd` 解析；`script_path` 使用 `ctx.fs.readBytesNoFollow`，因此最终链接拒绝、普通文件验证和有界读取共享同一个提供方描述符或等价对象。可选 `args` 是以全局变量 `args` 公开的 JSON 对象。`validate_only` 使用罐装 host 对单条路径做冒烟检查，不创建运行。`resume_from_run_id` 恢复同一进程中的一个逻辑运行；只有上一次尝试达到上限时，才能同时提高 `agent_budget`。插件还会贡献一个 `tool:<toolName>` 系统提示词段，其中包含使用策略：只有用户明确要求工作流或大型编排时才使用该工具；一两项委派优先使用普通 subagent 调用。
 
 ## 生命周期
 
-收集是同步的（类似 [`dsh-tool-subagent`](../../subagent/tool-subagent/README.md)）：`execute` 启动运行并等待 `run.result`；这些操作位于 `try/finally` 中，该结构总会 dispose（资源释放）运行，使脚本及其子 agent（智能体）在每条路径上完全停稳。`exec.signal` 会桥接到 `run.cancel()`，包括启动前已经中止的情况。非 `completed` 结束原因会映射为报告原因的 `isError` 结果，绝不会把局部输出当作成功；`start()` 同步抛出的解析／meta 失败会变成模型可据以修正的 `isError`。完成时返回规范值 `{ runId, agentsStarted, result }`；Native 渲染器保留 meta 名称、agent 数量和 JSON 值，只会在 `maxResultChars` 处截断该投影。
+启动是后台工作。成功调用会在 supervisor 发布运行后返回 `{ status: "started", displayName, runId, script_path? }`；父级轮次不会等待脚本完成。supervisor 负责取消、尝试 dispose、完成通知与 dashboard 保留数据。`validate_only` 则等待冒烟检查结果，并且不创建运行、Chat 节点或 dashboard 行。
 
-对于根 transport 执行（`exec.parent` 缺省），工具还会把运行投影到调用 Agent 的 Session：`start()` 返回后写 run-start，只记录 `run.id` 匹配的成员开始与结束，并且只在 `run.result` 已取得且 `dispose()` 完全停稳后写 run-end。嵌套 transport 调用照常执行，但不写工作流记录。任一次 Session append 首次失败后，本运行会停止后续记录并只告警一次，留下空记录或合法连续前缀，同时不改变工具结果和清理。
+对于根 transport 执行（`exec.parent` 缺省），工具通过 `ctx.workflowRunRecorder.launch(...)` 将它唯一一次 supervisor start 归因给调用 Agent 的 Session。recorder 把 supervisor 的逻辑生命周期投影到该 Session：稳定的受监管运行 ID 写入一次 `tool-workflow/run-start`；所有暂停／恢复尝试产生的逻辑成员事件都会追加到同一记录；只有终态尝试 dispose 后才写入一次 `tool-workflow/run-end`。暂停、等待输入或预算受限的尝试不会关闭记录。进程或所有者中断会以 `stopReason: "interrupted"` 关闭记录。嵌套 transport 调用照常执行，但不写工作流记录。任一次 Session append 首次失败后，本运行会停止后续记录并只告警一次，留下空记录或合法连续前缀，同时不改变执行。
 
-浏览器安全的 `@deepseek-ai/dsh-tool-workflow/types` 子路径拥有这四类 log-only 事件 payload 及其 `SessionEventMap` 声明。包 invariant 会在冷加载和实时追加时拒绝重复 start、未配对成员、仍有开放成员的终点和 run-end 后更新，同时允许缺失终态后缀的连续前缀。
+浏览器安全的 `@deepseek-ai/dsh-workflow-run-recorder/types` 子路径拥有这四类 log-only 事件 payload 及其 `SessionEventMap` 声明。recorder 包的 invariant 会在冷加载和实时追加时拒绝重复 start、未配对成员、仍有开放成员的终点和 run-end 后更新，同时允许缺失终态后缀的连续前缀。
 
 ## 渲染意图
 
-渲染意图预先确定（见[渲染意图 Agent Note](../../../.agents/notes/implemented/architecture/2026-07-02-tool-render-intent-union.md)）：使用一个 `generic` 卡片，标题为 `workflow: <meta.name>`，直接从 `args.meta.name` 读取（呈现是参数的纯函数，不要求引擎解析）；脚本文本作为 `rawInput` 携带。结果继续使用 generic 卡片。
+渲染意图预先确定（见[渲染意图 Agent Note](../../../.agents/notes/implemented/architecture/2026-07-02-tool-render-intent-union.md)）：使用一个 `generic` 卡片，标题依次从 `args.name`、`args.meta?.name` 与固定 `workflow` 回退值派生（呈现是参数的纯函数，不要求提供方解析）；脚本文本作为 `rawInput` 携带。结果继续使用 generic 卡片。
 
 ## 配置
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
 | `toolName` | `workflow` | 要注册的面向模型工具名称。 |
-| `maxResultChars` | `50000` | 渲染结果上限；更长的 JSON 会被截断并附上提示。 |
+| `maxResultChars` | `50000` | `validate_only` 渲染结果上限；更长的 JSON 会被截断并附上提示。 |
+| `maxDefinitionBytes` | `1048576` | 单个内联脚本或 `script_path` 可接受的最大 UTF-8 字节数。 |
 
 ## 模型体验
 
@@ -67,11 +68,11 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 #### 模型看到的内容
 
-由模型编写的完整脚本、元数据和 args 会保留在 assistant 工具调用中。成功结果精确为 `workflow "<name>" completed (<count> agent<optional-s>).`、换行、`Return value:`、换行，以及经过美化打印且依赖数据的 JSON；达到上限时，会在新行添加 `… [truncated: <omitted> more characters]`。失败结果精确为 `Error: workflow run was cancelled`（可以追加后缀 ` (<error>)`）、`Error: workflow run failed: <error-or-unknown error>` 或防御性的 `Error: workflow run ended abnormally (<reason>)`；没有所属 agent 的调用变为 `Error: workflow tool requires a calling agent (exec.agent was undefined)`。中间子 agent 消息会被省略。
+由模型编写的完整脚本、元数据和 args 会保留在 assistant 工具调用中。实时启动会渲染紧凑 JSON，其中包含 `status`、`displayName`、逻辑 `runId` 和可选 `script_path`；恢复会用 `status: "resumed"` 渲染同一个稳定身份。Host 的斜杠命令确认仍采用适合人类阅读且不含 UUID 的文本。supervisor 随后独立发布终态结果或 scratch 报告。`validate_only` 调用会报告有界的冒烟检查结果。没有所属 agent 的调用会以 `workflow tool requires a calling agent (exec.agent was undefined)` 失败。中间子 agent 消息会被省略。
 
 #### Token 影响
 
-调用 token 可能很多，并会保留到压缩（compaction）为止。结果渲染受 `maxResultChars` 限制；子模型 token 与父级保留的上下文相互独立。
+调用 token 可能很多，并会保留到压缩（compaction）为止。`validate_only` 渲染受 `maxResultChars` 限制；子模型 token 与父级保留的上下文相互独立。
 
 #### KV Cache 影响
 
@@ -79,7 +80,8 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 ## 已知限制与暂缓事项
 
-- **父级轮次会阻塞到整个工作流结算**：没有后台启动／轮询接口，取消会丢弃局部输出并返回错误。
-- **`args` 必须是对象，Native 结果文本有界**：调用方把顶层数组／标量包装到字段中；规范工作流结果保持完整，超过 `maxResultChars` 的 JSON 会在面向模型的投影中截断，而不是存储在检索句柄背后。
-- **每次工具注册的工作流策略固定**：提供方选择、上限和工具名称属于部署配置，不是模型调用参数。
-- **持久记录只覆盖顶层且只供观察**：嵌套 Code Mode dispatch 不记录；记录故障会刻意退化为不完整前缀，而不改变执行。
+- **`args` 必须是对象**：调用方应把顶层数组或标量包装到字段中。
+- **`validate_only` 只跟随一条罐装路径**：它不会枚举分支，也不会使用实时子 agent 工具。
+- **不支持跨进程恢复**：重启后恢复到的活跃运行会成为终态 Interrupted 行。
+- **持久记录只覆盖顶层且只供观察**：嵌套 transport dispatch 不记录；记录故障会刻意退化为不完整前缀，而不改变执行。
+- **本地 Windows 文件来源不可用**：本地提供方无法在 Windows 上安全实现最终组件不跟随读取，因此 `script_path` 和由 registry 支持的 `name` 来源会以 `FS_IO_ERROR` 明确失败；内联 `script` 来源仍可用。

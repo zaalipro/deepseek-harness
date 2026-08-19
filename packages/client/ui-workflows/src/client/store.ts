@@ -1,26 +1,40 @@
-/**
- * Dashboard-only viewing state: whether the overlay is open and which run is
- * selected. Run data itself lives in the runtime sessions mirror
- * (`workflowRunsBySession`), never here — a declared store carries only
- * interaction state that survives remounts.
- */
+/** Dashboard interaction state; workflow business data stays in its controller. */
 
 import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-runtime/client'
 
 /** The state one workflows store instance exposes. */
+export type WorkflowInspectorTab = 'outcome' | 'logs' | 'result' | 'artifacts'
+
+/** Narrow-screen drilldown location. */
+export type WorkflowMobileView = 'runs' | 'run' | 'inspector'
+
+/** The state one workflows dashboard store exposes. */
 export interface WorkflowsState {
   open: boolean
-  selected: string | undefined
+  selectedRunId: string | undefined
+  selectedMemberId: string | undefined
+  inspectorTab: WorkflowInspectorTab
+  mobileView: WorkflowMobileView
 }
 
 /** Annotation twin of the actions literal (the export needs a declared return type). */
 export type WorkflowsActions = {
-  /** Open the overlay, optionally restoring a selected display name. */
-  open: (draft: WorkflowsState, selected?: string) => void
-  /** Close the overlay (selection survives for the next open). */
+  /** Open the overlay at the retained selection. */
+  open: (draft: WorkflowsState) => void
+  /** Close the overlay without discarding selection. */
   close: (draft: WorkflowsState) => void
-  /** Select one run's detail view by display name. */
-  select: (draft: WorkflowsState, selected: string) => void
+  /** Select a run and reveal its execution view on narrow screens. */
+  selectRun: (draft: WorkflowsState, runId: string) => void
+  /** Reconcile a removed or initial run without changing narrow navigation. */
+  reconcileRun: (draft: WorkflowsState, runId: string) => void
+  /** Select a member and reveal its outcome inspector. */
+  selectMember: (draft: WorkflowsState, memberId: string) => void
+  /** Select one inspector section. */
+  selectTab: (draft: WorkflowsState, tab: WorkflowInspectorTab) => void
+  /** Return to the run navigator on narrow screens. */
+  showRuns: (draft: WorkflowsState) => void
+  /** Return to the execution view on narrow screens. */
+  showRun: (draft: WorkflowsState) => void
 }
 
 /**
@@ -29,14 +43,36 @@ export type WorkflowsActions = {
  */
 export function createWorkflowsStore(): EngineStoreHandle<WorkflowsState, WorkflowsActions> {
   return defineStore({
-    init: (): WorkflowsState => ({ open: false, selected: undefined }),
+    init: (): WorkflowsState => ({
+      open: false,
+      selectedRunId: undefined,
+      selectedMemberId: undefined,
+      inspectorTab: 'outcome',
+      mobileView: 'runs',
+    }),
     actions: {
-      open: (draft, selected) => {
-        draft.open = true
-        if (selected !== undefined) draft.selected = selected
-      },
+      open: (draft) => { draft.open = true },
       close: (draft) => { draft.open = false },
-      select: (draft, selected) => { draft.selected = selected },
+      selectRun: (draft, runId) => {
+        if (draft.selectedRunId !== runId) draft.selectedMemberId = undefined
+        draft.selectedRunId = runId
+        draft.mobileView = 'run'
+      },
+      reconcileRun: (draft, runId) => {
+        if (draft.selectedRunId !== runId) draft.selectedMemberId = undefined
+        draft.selectedRunId = runId
+      },
+      selectMember: (draft, memberId) => {
+        draft.selectedMemberId = memberId
+        draft.inspectorTab = 'outcome'
+        draft.mobileView = 'inspector'
+      },
+      selectTab: (draft, tab) => {
+        draft.inspectorTab = tab
+        draft.mobileView = 'inspector'
+      },
+      showRuns: (draft) => { draft.mobileView = 'runs' },
+      showRun: (draft) => { draft.mobileView = 'run' },
     },
   })
 }

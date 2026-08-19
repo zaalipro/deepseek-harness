@@ -5,6 +5,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { boot, installFailLoud, loadEnv, resolveConfigPath } from '@deepseek-ai/dsh-app-boot'
 import { runFixtureTurn } from '@deepseek-ai/dsh-loader-smoke'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+// Context declaration merge for the optional assembled workflow drain.
+import type {} from '@deepseek-ai/dsh-workflow-supervisor'
 
 const NAME = 'headless-test-driver'
 const [configPath, ...taskParts] = process.argv.slice(2)
@@ -19,6 +21,9 @@ try {
   ctx = await boot(NAME, resolveConfigPath(configPath, undefined))
   const result = await runFixtureTurn(ctx, {
     task: taskParts.join(' '),
+    drain: async (agent) => {
+      await ctx?.get('workflowSupervisor')?.whenOwnerQuiescent(agent)
+    },
     onEvent: (sessionId: string, event: SessionEvent) => {
       process.stdout.write(`${JSON.stringify({ type: 'session_event', sessionId, event })}\n`)
     },

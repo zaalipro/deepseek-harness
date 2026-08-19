@@ -16,6 +16,7 @@ afterEach(() => { Object.assign(internals, originalInternals) })
 interface Script {
   before?(session: Session): void
   afterPrompt(session: Session, message: UserMessage): Promise<void> | void
+  drain?(session: Session): Promise<void> | void
 }
 
 function appendTurn(
@@ -56,6 +57,9 @@ async function bench(script: Script): Promise<{
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentDefaultModelConfig, { provider: 'test-provider', model: 'test-model' })
+  ctx.provide('workflowSupervisor', {
+    whenOwnerQuiescent: async () => { await script.drain?.(ctx.agents.roots()[0]!.session) },
+  } as never)
   ctx.agents.setFactory({
     async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
       const session = ctx.sessions.create(options.sessionId, {
@@ -143,6 +147,26 @@ describe('headless runner', () => {
     await test.ctx.fiber.dispose()
   })
 
+  it('includes a supervised workflow completion turn before flushing and exiting', async () => {
+    let prompt: UserMessage | undefined
+    const test = await bench({
+      afterPrompt(session, message) {
+        prompt = message
+        appendTurn(session, 1, message, 'workflow launched', true)
+      },
+      drain(session) {
+        if (prompt === undefined) throw new Error('workflow drain ran before the prompt')
+        appendTurn(session, 2, prompt, 'workflow completion acknowledged', true)
+      },
+    })
+    expect(await test.run()).toMatchObject({
+      code: 0,
+      out: 'workflow completion acknowledged\n',
+      err: '',
+    })
+    await test.ctx.fiber.dispose()
+  })
+
   it('exits 1 when the final turn does not complete', async () => {
     const test = await bench({
       afterPrompt(session, message) { appendTurn(session, 1, message, undefined, false) },
@@ -188,6 +212,7 @@ describe('headless runner', () => {
     })
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) } as never)
     ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
+    ctx.provide('workflowSupervisor', { whenOwnerQuiescent: () => Promise.resolve() } as never)
     ctx.provide('agents', { create: () => Promise.reject(new Error('factory exploded')) } as never)
     apply(ctx, { task: 't' })
     expect(await exited).toBe(1)
@@ -205,6 +230,7 @@ describe('headless runner', () => {
     })
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) } as never)
     ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
+    ctx.provide('workflowSupervisor', { whenOwnerQuiescent: () => Promise.resolve() } as never)
     const rejected = {
       then(_resolve: (value: never) => void, reject: (reason: unknown) => void): void {
         reject('factory exploded')

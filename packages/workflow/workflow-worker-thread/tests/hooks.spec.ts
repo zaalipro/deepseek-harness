@@ -15,7 +15,7 @@ function init(body: string, overrides?: { args?: unknown; journal?: WorkerInit['
   return {
     meta: { name: 'test-flow', description: 'a test workflow' },
     body,
-    limits: { maxConcurrentAgents: 8, maxTotalAgents: 1000, maxItemsPerCall: 4096, syncTimeoutMs: 5000, ...overrides?.limits },
+    limits: { maxConcurrentAgents: 8, maxTotalAgents: 1024, maxItemsPerCall: 4096, syncTimeoutMs: 5000, ...overrides?.limits },
     ...overrides?.args !== undefined ? { args: overrides.args } : {},
     ...overrides?.journal !== undefined ? { journal: overrides.journal } : {},
   }
@@ -134,13 +134,20 @@ describe('workflow script hooks', () => {
       const two = await agent('two')
       complete({ one, two })
     `, {
-      journal: [{ seq: 1, result: 'committed' }],
+      journal: [{
+        kind: 'agent',
+        ordinal: 1,
+        seq: 1,
+        callId: 'root/agent:1',
+        fingerprint: 'fb4cfb005266ff55b15d18f5cf510f520c4cfe4c0950691499eb4d1944dbbb8a',
+        result: 'committed',
+      }],
     }))
     const result = await h.result
     expect(result.value).toEqual({ one: 'committed', two: 'live-0' })
     // Only the second agent() launched a live child.
     expect(h.ofType(WorkerToHostType.ChildStart).length).toBe(1)
-    expect(result.agentsStarted).toBe(1)
+    expect(result.agentsStarted).toBe(2)
   })
 
   it('await_user parks and resume continues past the gate', async () => {
@@ -162,6 +169,15 @@ describe('workflow script hooks', () => {
     void session
   })
 
+  it('cancellation releases an await_user gate and settles without host force termination', async () => {
+    const h = harness({ go: false })
+    void runWorkerSession(h.worker, init("await await_user('user', 'confirm')\nreturn 'unreachable'"))
+    h.host.postMessage({ type: HostToWorkerType.Go } satisfies HostToWorkerMessage)
+    await waitFor(() => h.ofType(WorkerToHostType.Gate).length === 1)
+    h.host.postMessage({ type: HostToWorkerType.Cancel, reason: 'stopped at gate' } satisfies HostToWorkerMessage)
+    await expect(h.result).resolves.toMatchObject({ stopReason: 'cancelled', errorCode: 'CANCELLED' })
+  })
+
   it('pause re-fires on every resume', async () => {
     const h = harness({ go: false })
     void runWorkerSession(h.worker, init('await pause(\'user\', \'missing args\')'))
@@ -171,6 +187,26 @@ describe('workflow script hooks', () => {
     h.host.postMessage({ type: HostToWorkerType.Resume } satisfies HostToWorkerMessage)
     // Re-fires: a second gate arrives and the run never settles.
     await waitFor(() => h.ofType(WorkerToHostType.Gate).length === 2)
+  })
+
+  it.each([
+    ['Date.now()', 'Date'],
+    ['new Date()', 'Date'],
+    ['Math.random()', 'Math.random()'],
+    ['Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1)', 'Atomics'],
+    ['new WeakRef({})', 'WeakRef'],
+  ])('rejects nondeterministic authored API %s', async (expression, api) => {
+    const h = harness()
+    void runWorkerSession(h.worker, init(`return ${expression}`))
+    const result = await h.result
+    expect(result).toMatchObject({ stopReason: 'error', errorCode: 'INVALID_ARGUMENT' })
+    expect(result.error).toContain(`${api} is unavailable in workflow scripts`)
+  })
+
+  it('keeps deterministic Math operations available', async () => {
+    const h = harness()
+    void runWorkerSession(h.worker, init('return Math.max(-4, 7, 2)'))
+    await expect(h.result).resolves.toMatchObject({ value: 7, stopReason: 'completed' })
   })
 })
 

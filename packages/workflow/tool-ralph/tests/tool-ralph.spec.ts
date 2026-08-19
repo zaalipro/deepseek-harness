@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CallId } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type JsonValue } from '@deepseek-ai/dsh-session'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentCapabilities, SubagentProvider, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -134,7 +134,7 @@ const BLOCKED = {
 async function settleCompleted(
   engine: StubEngine,
   pending: Promise<ToolExecutionResult>,
-  value: unknown,
+  value: JsonValue,
   agentsStarted = 1,
 ): Promise<ToolExecutionResult> {
   await vi.waitFor(() => { expect(engine.requests.length).toBeGreaterThan(0) })
@@ -332,7 +332,7 @@ describe('dsh-tool-ralph', () => {
   })
 
   it('turns malformed fixed-workflow terminal values and reports into errors', async () => {
-    const cases: { value: unknown; message: string; config?: toolRalph.Config }[] = [
+    const cases: { value: JsonValue; message: string; config?: toolRalph.Config }[] = [
       { value: null, message: 'malformed terminal result' },
       { value: { status: 'complete', roundsStarted: 0, report: COMPLETE }, message: 'malformed terminal result' },
       { value: { status: 'complete', roundsStarted: 3, report: COMPLETE }, message: 'malformed terminal result', config: { maxRounds: 2 } },

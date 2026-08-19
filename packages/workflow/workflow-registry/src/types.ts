@@ -5,7 +5,7 @@
  * @module @deepseek-ai/dsh-workflow-registry/types
  */
 
-import type { WorkflowPhase } from '@deepseek-ai/dsh-workflow/types'
+import type { WorkflowMeta, WorkflowPhase } from '@deepseek-ai/dsh-workflow/types'
 
 /** Which discovery root supplied a saved workflow definition. */
 export type WorkflowScope = 'bundled' | 'project' | 'user'
@@ -13,32 +13,24 @@ export type WorkflowScope = 'bundled' | 'project' | 'user'
 /** Discovery-root precedence: the first scope containing a name wins. */
 export const WORKFLOW_SCOPE_PRECEDENCE: readonly WorkflowScope[] = ['bundled', 'project', 'user']
 
-/** Discovery key for one saved workflow: kebab-case, no leading or trailing hyphen. */
-export const WORKFLOW_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-
-/**
- * Whether a string is a valid saved-workflow name.
- * @param name - candidate workflow name to validate.
- * @returns whether the name matches the public workflow-name grammar.
- */
-export function isWorkflowName(name: string): boolean {
-  return WORKFLOW_NAME.test(name)
-}
-
-/** Invocation-neutral listing metadata for one saved workflow definition. */
-export interface WorkflowDefinitionSummary {
+/** Browser-safe saved-definition metadata returned by the workflowDefinitions Remote. */
+export interface WorkflowDefinitionSummaryView {
   /** Kebab-case discovery key, equal to `meta.name`. */
   readonly name: string
   /** One-line description of what the workflow does. */
   readonly description: string
-  /** Optional guidance on when this workflow applies (listing-only). */
+  /** Optional guidance on when this workflow applies. */
   readonly whenToUse?: string
-  /** Optional phase declarations matched by `phase()` calls. */
-  readonly phases?: readonly WorkflowPhase[]
   /** Which discovery root supplied this definition. */
   readonly scope: WorkflowScope
-  /** Absolute path of the `.workflow.json` file, when the scope has one. */
-  readonly path?: string
+}
+
+/** Invocation-neutral Host listing metadata for one saved workflow definition. */
+export interface WorkflowDefinitionSummary extends WorkflowDefinitionSummaryView {
+  /** Optional phase declarations matched by `phase()` calls. */
+  readonly phases?: readonly WorkflowPhase[]
+  /** Absolute path of the discovered `.workflow.json` file. */
+  readonly path: string
 }
 
 /** One full saved workflow definition: listing metadata plus the script body. */
@@ -53,6 +45,23 @@ export interface WorkflowLookupOptions {
   readonly cwd?: string
   /** Abort discovery for the current caller. */
   readonly signal?: AbortSignal
+}
+
+/** Writable definition scopes; bundled definitions are immutable. */
+export type WorkflowSaveScope = Exclude<WorkflowScope, 'bundled'>
+
+/** One validated envelope candidate supplied to {@code WorkflowRegistry.save}. */
+export interface WorkflowDefinitionEnvelope {
+  /** Plain metadata beside the script body. */
+  readonly meta: WorkflowMeta
+  /** Plain-JavaScript workflow body. */
+  readonly script: string
+}
+
+/** Workspace, scope, and cancellation for an atomic definition save. */
+export interface WorkflowSaveOptions extends WorkflowLookupOptions {
+  /** Destination definition scope. */
+  readonly scope: WorkflowSaveScope
 }
 
 /** One catalog observation plus whether discovery completed within a stable revision. */

@@ -15,16 +15,25 @@
       "path": "../../../vendor/cordis"
     },
     {
+      "path": "../../core/session"
+    },
+    {
       "path": "../../../vendor/schemastery"
     },
     {
       "path": "../../util/home-paths"
     },
     {
+      "path": "../../fs/fs"
+    },
+    {
       "path": "../workflow"
     },
     {
       "path": "../../runtime-diagnostics/invariants"
+    },
+    {
+      "path": "../../typert/protocol"
     }
   ]
 }

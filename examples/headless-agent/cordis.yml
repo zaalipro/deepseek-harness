@@ -137,6 +137,21 @@
   config:
     provider: spawn
 
+- id: workflow-registry
+  name: '@deepseek-ai/dsh-workflow-registry'
+
+- id: workflow-supervisor
+  name: '@deepseek-ai/dsh-workflow-supervisor'
+
+- id: workflow-run-recorder
+  name: '@deepseek-ai/dsh-workflow-run-recorder'
+
+- id: user-questions
+  name: '@deepseek-ai/dsh-user-questions'
+
+- id: workflow-user-questions
+  name: '@deepseek-ai/dsh-workflow-user-questions'
+
 - id: tool-workflow
   name: '@deepseek-ai/dsh-tool-workflow'
 

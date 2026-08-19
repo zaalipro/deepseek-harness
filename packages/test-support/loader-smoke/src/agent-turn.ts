@@ -20,6 +20,12 @@ export interface FixtureTurnResult {
 export interface FixtureTurnOptions {
   readonly task: string
   readonly onEvent?: (sessionId: string, event: SessionEvent) => void
+  /**
+   * Optional assembled-application drain after the submitted turn first
+   * reaches idle. The callback owns any capability-specific quiescence and
+   * must resolve only after all additional events the fixture should observe.
+   */
+  readonly drain?: (agent: Agent) => Promise<void>
 }
 
 function addUsage(total: TokenUsage | undefined, step: TokenUsage): TokenUsage {
@@ -50,7 +56,7 @@ function onlyRootAgent(ctx: Context): Agent {
 /**
  * Drive one task from its durable inbox receipt through whole-agent idle.
  * @param ctx - settled Loader context with exactly one configured root agent.
- * @param options - task and optional canonical-event observer.
+ * @param options - task, optional canonical-event observer, and application drain.
  * @returns the final assistant text and accumulated model usage.
  */
 export async function runFixtureTurn(ctx: Context, options: FixtureTurnOptions): Promise<FixtureTurnResult> {
@@ -86,6 +92,7 @@ export async function runFixtureTurn(ctx: Context, options: FixtureTurnOptions):
   try {
     agent.followup(message)
     await agent.whenIdle()
+    await options.drain?.(agent)
   } finally {
     disposeListener()
   }

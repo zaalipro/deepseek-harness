@@ -62,7 +62,6 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 // Type-only: resolves `ctx.get('tasks')` to the background job registry.
 import type {} from '@deepseek-ai/dsh-jobs'
 import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
-import type {} from '@deepseek-ai/dsh-workflow-supervisor'
 // Type-only: resolves `ctx.get('sessionProjectionCache')` (the cold listing column).
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 // GoalError narrows domain rejections to their stable codes at the wire boundary.
@@ -109,10 +108,15 @@ import {
   hasApiRemoteSubagentOwner,
   inspectApiRemoteSession,
 } from '@deepseek-ai/dsh-api-remotes'
+import type { WorkflowRunChange } from '@deepseek-ai/dsh-api-remotes'
 import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
+import { FrameQueue } from './frame-queue.ts'
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
+
+/** Default distinct workflow Session keys retained for one slow Host reader. */
+export const DEFAULT_WORKFLOW_CHANGE_QUEUE_MAX_SESSIONS = 64
 
 /**
  * Non-model settings namespaces intentionally served to the Web client. The
@@ -411,40 +415,6 @@ function presetFailure(request: RpcRequest<unknown>, error: unknown): RpcRespons
   return undefined
 }
 
-/** Simple async queue: core callbacks push, the AsyncIterable pulls; abort/return cleans up. */
-class FrameQueue<F> {
-  private buffer: F[] = []
-  private waiter: (() => void) | undefined
-  private done = false
-
-  push(item: F): void {
-    if (this.done) return
-    this.buffer.push(item)
-    this.waiter?.()
-  }
-
-  end(): void {
-    this.done = true
-    this.waiter?.()
-  }
-
-  async *iterate(signal: AbortSignal, cleanup: () => void): AsyncGenerator<F> {
-    const onAbort = (): void => { this.end() }
-    signal.addEventListener('abort', onAbort, { once: true })
-    try {
-      while (true) {
-        while (this.buffer.length > 0) yield this.buffer.shift() as F
-        if (this.done || signal.aborted) return
-        await new Promise<void>((resolve) => { this.waiter = resolve })
-        this.waiter = undefined
-      }
-    } finally {
-      signal.removeEventListener('abort', onAbort)
-      cleanup()
-    }
-  }
-}
-
 /**
  * Server-side frame mint: pure pushes get a fresh rpcId per frame (answerable
  * frames — approval/question requested — mint their stable id in their
@@ -660,6 +630,8 @@ export interface ApiProxyDefaults {
   sessionExportCompressionLevel?: SessionLogCompressionLevel
   /** Maximum artifact size eligible for one cold blankness read. */
   coldBlankProbeMaxBytes?: number
+  /** Maximum distinct workflow Sessions pending before a global invalidation. */
+  workflowChangeQueueMaxSessions?: number
   /**
    * Whether handing a path to the native opener can work at all — the
    * `hasDocument` capability the preset roster reports, and the switch
@@ -1109,6 +1081,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     ?? DEFAULT_SESSION_LOG_COMPRESSION_LEVEL
   const coldBlankProbeMaxBytes = defaults.coldBlankProbeMaxBytes
     ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES
+  const workflowChangeQueueMaxSessions = defaults.workflowChangeQueueMaxSessions
+    ?? DEFAULT_WORKFLOW_CHANGE_QUEUE_MAX_SESSIONS
   /** The seed model each create/resume declares; re-read so it never goes stale. */
   const agentOptions = (): AgentOptions => {
     const { provider, model } = defaults.defaultModelSelection()
@@ -3468,17 +3442,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }
           }
         }
-        // Workflow-run baseline, same posture as background tasks: whole-set
-        // snapshot per session, absent key means no runs.
-        const workflowSupervisor = ctx.get('workflowSupervisor')
-        if (workflowSupervisor !== undefined) {
-          for (const session of ctx.sessions.list()) {
-            const runs = workflowSupervisor.listRuns(ctx.agents.get(session.id))
-            if (runs.length > 0) {
-              queue.push(frame({ type: 'session/workflow-runs', sessionId: session.id, runs }))
-            }
-          }
-        }
         // Per-session open-call table for result-view pairing. Bounded by the
         // per-turn call count: entries clear on turn/end; a table miss (stream
         // opened mid-turn) backscans the session's in-memory events instead.
@@ -3514,12 +3477,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             if (views.length > 0) {
               queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
             }
-            if (workflowSupervisor !== undefined) {
-              const runs = workflowSupervisor.listRuns(ctx.agents.get(session.id))
-              if (runs.length > 0) {
-                queue.push(frame({ type: 'session/workflow-runs', sessionId: session.id, runs }))
-              }
-            }
           }),
           ctx.on('session/disposed', (session: Session) => {
             openCalls.delete(session.id)
@@ -3540,12 +3497,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 sessionId: session.id,
                 jobs: jobViews(jobs.list(ctx.agents.get(session.id))),
               }))
-            }
-          })],
-          ...workflowSupervisor === undefined ? [] : [ctx.on('workflows/run-change', () => {
-            for (const session of ctx.sessions.list()) {
-              const runs = workflowSupervisor.listRuns(ctx.agents.get(session.id))
-              queue.push(frame({ type: 'session/workflow-runs', sessionId: session.id, runs }))
             }
           })],
         ]
@@ -3648,11 +3599,31 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             // satisfies every member of the union `on` accepts here;
             // assertJsonArgs proves the payload is JSON-safe before it queues.
             ((...args: unknown[]) => {
-              queue.push(frame({
+              const forwarded = frame<HostFrame>({
                 type: 'host/remote-event',
                 event: name,
                 args: assertJsonArgs(name, args),
-              }))
+              })
+              if (name === 'workflows/run-change') {
+                const [change] = args as [WorkflowRunChange]
+                if (change.kind === 'invalidate-all') {
+                  queue.replaceCoalescedLane('workflows/run-change\u0000*', forwarded)
+                  return
+                }
+                queue.pushCoalescedBounded(
+                  `workflows/run-change\u0000${change.sessionId}`,
+                  forwarded,
+                  workflowChangeQueueMaxSessions,
+                  'workflows/run-change\u0000*',
+                  frame<HostFrame>({
+                    type: 'host/remote-event',
+                    event: name,
+                    args: [{ kind: 'invalidate-all' }],
+                  }),
+                )
+                return
+              }
+              queue.push(forwarded)
             }),
           )),
         ]

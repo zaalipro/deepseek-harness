@@ -64,6 +64,8 @@ The `settings.*`, `credentials.*`, and `llm.*` domains are the configuration-pag
 
 `AbstractApiClient` holds every protocol invariant — rpcId minting, envelope wrap/unwrap, zod parsing, SSE frame decoding, unary timeout, microtask-batched envelope observation (`subscribeEnvelopes`) — while platform subclasses supply only the `doFetch` transport aspect. `InProcessApiClient` over `toFetchHandler(api)` remains the isomorphic point for callers and carrier tests that need the full wire serialization/validation path without a network. Product `dsh --profile headless` is a direct core entry point and does not mount this package.
 
+The host stream forwards `workflows/run-change` as a latest-only lane keyed by Session, while ordinary frames remain FIFO. `workflowChangeQueueMaxSessions` bounds the distinct unread Session keys per reader (default 64); exceeding it replaces the workflow lane with one global invalidation, so clients refetch bounded Remote pages instead of accumulating run snapshots.
+
 ## Model Experience
 
 None, as the package defines the client↔host wire contract and carriers; nothing here reaches a model request.

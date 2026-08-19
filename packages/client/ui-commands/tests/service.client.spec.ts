@@ -13,7 +13,9 @@ import type { CommandResult } from '@deepseek-ai/dsh-commands/types'
 import { createScope, scopeOf } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ClientSessionContext, ConsumeTokenRequest, InputTriggerPick, InputTriggerSource } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
-import type { CommandContribution, CommandDecoration, CommandUiSpec, SelectOption } from '../src/client/contract.ts'
+import type {
+  CommandContribution, CommandDecoration, PopupSelectCommandUiSpec, SelectOption,
+} from '../src/client/contract.ts'
 import type { CommandDescriptor } from '../src/client/directory.ts'
 import { CommandUiRuntime } from '../src/client/service.ts'
 
@@ -38,6 +40,10 @@ interface BenchOptions {
   /** Scripted catalog per list payload; default serves the fixed catalogs by session. */
   commands?: (payload: { sessionId: SessionId }) => Promise<{ commands: CommandDescriptor[] }>
   execute?: (payload: { sessionId: SessionId; line: string }) => Promise<ExecuteValue>
+  /** Optional raw carrier rejection used to cover non-Error transport failures. */
+  executeTransportFailure?: unknown
+  /** Mount the composer notice face; defaults to true. */
+  conversation?: boolean
   addressed?: SessionId
 }
 
@@ -82,6 +88,7 @@ async function bench(opts: BenchOptions = {}) {
     },
     execute: async (sessionId: SessionId, line: string) => {
       executeCalls.push({ sessionId, line })
+      if (opts.executeTransportFailure !== undefined) throw opts.executeTransportFailure
       return await carried(async () => {
         const fallback = (): Promise<ExecuteValue> => Promise.resolve({ matched: true })
         const value = await (opts.execute ?? fallback)({ sessionId, line })
@@ -127,15 +134,17 @@ async function bench(opts: BenchOptions = {}) {
   })
   /** Notices the fake conversation face collected (runDetached routing). */
   const notices: Array<{ scope: SessionId | undefined; level: 'info' | 'error'; text: string }> = []
-  ctx.provide('conversation', {
-    input: {
-      for: (actx: Context) => ({
-        notify: (level: 'info' | 'error', text: string) => {
-          notices.push({ scope: scopeOf(actx), level, text })
-        },
-      }),
-    },
-  })
+  if (opts.conversation !== false) {
+    ctx.provide('conversation', {
+      input: {
+        for: (actx: Context) => ({
+          notify: (level: 'info' | 'error', text: string) => {
+            notices.push({ scope: scopeOf(actx), level, text })
+          },
+        }),
+      },
+    })
+  }
   const fiber = ctx.plugin(CommandUiRuntime)
   await fiber.await()
   const command = ctx.get('commandUi') as CommandUiRuntime
@@ -164,7 +173,7 @@ function menuPick(source: InputTriggerSource, name: string, session: ClientSessi
   return source.onPick(pick)
 }
 
-const themeUi = (over: Partial<CommandUiSpec> = {}): CommandUiSpec => ({
+const themeUi = (over: Partial<PopupSelectCommandUiSpec> = {}): PopupSelectCommandUiSpec => ({
   kind: 'popupSelect',
   options: () => Promise.resolve([{ id: 'dark', label: 'Dark' }]),
   onSelect: () => undefined,
@@ -179,10 +188,26 @@ const themeContribution = (over: Partial<CommandContribution> = {}): CommandCont
   ...over,
 })
 
+const workflowsContribution = (run: () => void | Promise<void>): CommandContribution => ({
+  name: 'workflows',
+  description: 'open the workflow dashboard',
+  available: () => true,
+  ui: { kind: 'action', run },
+})
+
 const req = (query: string, position: 'leading' | 'inline' = 'leading') =>
   ({ query, position, signal: new AbortController().signal })
 
 describe('registration', () => {
+  it('fails loud when the slash source service is unavailable', () => {
+    const ctx = new Context()
+    ctx.provide('sessions', { scope: () => undefined, scopeOf: () => undefined })
+    const commands = { list: () => Promise.resolve({ ok: true as const, value: [] }) }
+    ctx.provide('remote', { commands, $on: () => () => {} })
+    ctx.provide('remote.commands', commands)
+    expect(() => new CommandUiRuntime(ctx)).toThrow('slash service unavailable')
+  })
+
   it('registers the "/" source with matchSpace/matchEnter/warm hooks and removes it on fiber disposal', async () => {
     const { registered, source, fiber } = await bench()
     expect(typeof source.matchSpace).toBe('function')
@@ -216,6 +241,26 @@ describe('candidates', () => {
     const list = await source.candidates(proj('s1'), req('g'))
     expect(listCalls).toEqual([{ sessionId: sid('s1') }])
     expect(list).toEqual([{ name: 'goal', description: 'leadingInput kind', hint: 'goal text' }])
+  })
+
+  it('advertises and claims a qualified saved-workflow alias from the Host catalog', async () => {
+    const workflowPlan: CommandDescriptor = {
+      name: 'workflow-plan',
+      description: 'Saved workflow "plan": review a plan',
+      input: { hint: '[json-args]' },
+    }
+    const { source } = await bench({
+      commands: () => Promise.resolve({ commands: [workflowPlan] }),
+    })
+
+    await expect(source.candidates(proj('s1'), req('workflow-plan'))).resolves.toEqual([{
+      name: 'workflow-plan',
+      description: 'Saved workflow "plan": review a plan',
+      hint: '[json-args]',
+    }])
+    const outcome = source.matchSpace!(proj('s1'), '/workflow-plan')
+    if (outcome === undefined || outcome === 'handled' || !('claim' in outcome)) throw new Error('expected claim')
+    expect(outcome.claim).toMatchObject({ token: '/workflow-plan ', hint: '[json-args]' })
   })
 
   it('matches case-insensitive subsequences and ranks prefixes, boundaries, adjacency, gaps, then source order', async () => {
@@ -313,14 +358,15 @@ describe('decorations (bare-invocation UI on host commands)', () => {
     expect(outcome.claim.token).toBe('/goal ')
   })
 
-  it('a decoration with no host row never fires (bare enter misses; menu pick misses)', async () => {
-    const { command, source, mint, warm } = await bench()
+  it('a decoration with no host row never fires; bare enter remains in the command plane', async () => {
+    const { command, source, mint, warm, notices } = await bench()
     command.decorate(goalDecoration({ name: 'phantom' }))
     const scope = mint('s1')
     await warm(proj('s1'))
-    expect(await source.matchEnter!(proj('s1'), '/phantom', new AbortController().signal)).toBeUndefined()
+    expect(await source.matchEnter!(proj('s1'), '/phantom', new AbortController().signal)).toBe('handled')
     expect(menuPick(source, 'phantom', proj('s1'))).toBeUndefined()
     expect(command.popupFor(scope.ctx).state.getSnapshot().open).toBe(false)
+    expect(notices).toEqual([{ scope: sid('s1'), level: 'error', text: 'unknown command: /phantom' }])
   })
 
   it('an unavailable decoration falls through to the host bare path (detached execute)', async () => {
@@ -336,9 +382,26 @@ describe('decorations (bare-invocation UI on host commands)', () => {
     command.decorate(goalDecoration())
     expect(() => { command.decorate(goalDecoration()) }).toThrow('duplicate decoration for /goal')
   })
+
+  it('the disposer releases a decoration name for a later registration', async () => {
+    const { command } = await bench()
+    const dispose = command.decorate(goalDecoration())
+    dispose()
+    expect(() => command.decorate(goalDecoration())).not.toThrow()
+  })
 })
 
 describe('dispatch (menu column)', () => {
+  it('a decorated Host row opens its popup from the menu', async () => {
+    const { command, source, mint, warm } = await bench()
+    command.decorate({ name: 'goal', available: () => true, ui: themeUi() })
+    const scope = mint('s1')
+    await warm(proj('s1'))
+
+    expect(menuPick(source, 'goal', proj('s1'))).toBe('handled')
+    expect(command.popupFor(scope.ctx).state.getSnapshot()).toMatchObject({ open: true, command: 'goal' })
+  })
+
   it('contribution → opens the session popup with the open-time projection, no execute', async () => {
     const { command, source, mint, warm, executeCalls } = await bench()
     const options = vi.fn((_s: ClientSessionContext) => Promise.resolve([{ id: 'dark', label: 'Dark' }]))
@@ -361,6 +424,47 @@ describe('dispatch (menu column)', () => {
     expect(command.popupFor(scope.ctx).state.getSnapshot().open).toBe(false)
   })
 
+  it('a stale contribution pick for a missing session scope is contained locally', async () => {
+    const run = vi.fn()
+    const { command, source, warm, executeCalls } = await bench()
+    command.register(themeContribution())
+    command.register(workflowsContribution(run))
+    await warm(proj('ghost'))
+
+    expect(menuPick(source, 'theme', proj('ghost'))).toBe('handled')
+    expect(menuPick(source, 'workflows', proj('ghost'))).toBe('handled')
+    expect(run).not.toHaveBeenCalled()
+    expect(executeCalls).toEqual([])
+  })
+
+  it('client action → runs locally and consumes only after success, without Host execution', async () => {
+    let release!: () => void
+    const run = vi.fn(() => new Promise<void>((resolve) => { release = resolve }))
+    const { ctx, command, source, mint, warm, executeCalls } = await bench()
+    command.register(workflowsContribution(run))
+    const acknowledged = vi.fn()
+    ctx.on('command/executed', acknowledged)
+    const scope = mint('s1')
+    const consumes: ConsumeTokenRequest[] = []
+    scope.ctx.on('slash/input-consume-token', (request) => {
+      consumes.push(request)
+      return true
+    })
+    await warm(proj('s1'))
+
+    expect(menuPick(source, 'workflows', proj('s1'), 10)).toBe('handled')
+    expect(run).toHaveBeenCalledExactlyOnceWith(proj('s1'))
+    expect(menuPick(source, 'workflows', proj('s1'), 10)).toBe('handled')
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(consumes).toEqual([])
+    release()
+    await vi.waitFor(() => {
+      expect(consumes).toEqual([{ guard: { kind: 'span', span: { start: 0, end: 10, draftRev: 3 } } }])
+    })
+    expect(executeCalls).toEqual([])
+    expect(acknowledged).not.toHaveBeenCalled()
+  })
+
   it('host leadingInput → {claim} with token "/name " and hint; claiming never executes', async () => {
     const { source, warm, executeCalls } = await bench()
     await warm(proj('s1'))
@@ -372,7 +476,7 @@ describe('dispatch (menu column)', () => {
   })
 
   it('host bare → consume-token span guard on the session scope + detached execute', async () => {
-    const { source, mint, warm, executeCalls, executions } = await bench()
+    const { source, mint, warm, executeCalls } = await bench()
     const scope = mint('s1')
     const consumes: ConsumeTokenRequest[] = []
     scope.ctx.on('slash/input-consume-token', (r) => {
@@ -384,11 +488,6 @@ describe('dispatch (menu column)', () => {
     expect(consumes).toEqual([{ guard: { kind: 'span', span: { start: 0, end: 5, draftRev: 3 } } }])
     await vi.waitFor(() => {
       expect(executeCalls).toEqual([{ sessionId: sid('s1'), line: '/plan' }])
-      expect(executions).toEqual([{
-        sessionId: sid('s1'),
-        name: 'plan',
-        result: { kind: 'success' },
-      }])
     })
   })
 
@@ -479,29 +578,63 @@ describe('matchEnter (enter column)', () => {
     expect(executeCalls).toEqual([{ sessionId: sid('s1'), line: '/plan' }])
   })
 
-  it('bare kind with trailing text → undefined and no RPC (default sink owns the line)', async () => {
-    const { source, warm, executeCalls } = await bench()
+  it('bare kind with trailing text stays in the command plane and never reaches Host execution', async () => {
+    const { source, mint, warm, executeCalls, notices } = await bench()
+    mint('s1')
     await warm(proj('s1'))
-    await expect(source.matchEnter!(proj('s1'), '/plan now', signal())).resolves.toBeUndefined()
+    await expect(source.matchEnter!(proj('s1'), '/plan now', signal())).resolves.toBe('handled')
     expect(executeCalls).toEqual([])
+    expect(notices).toEqual([{ scope: sid('s1'), level: 'error', text: '/plan does not accept arguments' }])
   })
 
-  it('contribution: bare token opens the popup without touching the directory; args → undefined', async () => {
-    const { command, source, mint, listCalls } = await bench()
+  it('contribution: bare token opens the popup; argued use stays in the command plane', async () => {
+    const { command, source, mint, listCalls, notices } = await bench()
     command.register(themeContribution())
     const scope = mint('s1')
     await expect(source.matchEnter!(proj('s1'), '/theme', signal())).resolves.toBe('handled')
     expect(command.popupFor(scope.ctx).state.getSnapshot().open).toBe(true)
     expect(listCalls).toEqual([]) // contribution short-circuits ahead of ensureReady
-    await expect(source.matchEnter!(proj('s1'), '/theme dark', signal())).resolves.toBeUndefined()
+    await expect(source.matchEnter!(proj('s1'), '/theme dark', signal())).resolves.toBe('handled')
+    expect(notices).toEqual([{ scope: sid('s1'), level: 'error', text: '/theme does not accept arguments' }])
   })
 
-  it('unknown name, bare "/", and non-slash lines → undefined', async () => {
-    const { source, warm } = await bench()
+  it('client action: repeated bare tokens stay local; argued use stays in the command plane', async () => {
+    const run = vi.fn()
+    const { command, source, mint, listCalls, executeCalls, notices } = await bench()
+    command.register(workflowsContribution(run))
+    const scope = mint('s1')
+    const consumes: ConsumeTokenRequest[] = []
+    scope.ctx.on('slash/input-consume-token', (request) => {
+      consumes.push(request)
+      return true
+    })
+
+    await expect(source.matchEnter!(proj('s1'), '/workflows', signal())).resolves.toBe('handled')
+    await vi.waitFor(() => {
+      expect(consumes).toEqual([{ guard: { kind: 'bare-token', token: '/workflows' } }])
+    })
+    expect(run).toHaveBeenCalledExactlyOnceWith(proj('s1'))
+    expect(listCalls).toEqual([])
+    expect(executeCalls).toEqual([])
+    await expect(source.matchEnter!(proj('s1'), '/workflows', signal())).resolves.toBe('handled')
+    await vi.waitFor(() => { expect(run).toHaveBeenCalledTimes(2) })
+    expect(executeCalls).toEqual([])
+    await expect(source.matchEnter!(proj('s1'), '/workflows now', signal())).resolves.toBe('handled')
+    expect(run).toHaveBeenCalledTimes(2)
+    expect(notices).toEqual([{ scope: sid('s1'), level: 'error', text: '/workflows does not accept arguments' }])
+  })
+
+  it('unknown and empty slash names stay in the command plane; non-slash text remains a miss', async () => {
+    const { source, mint, warm, notices } = await bench()
+    mint('s1')
     await warm(proj('s1'))
-    await expect(source.matchEnter!(proj('s1'), '/nope', signal())).resolves.toBeUndefined()
-    await expect(source.matchEnter!(proj('s1'), '/', signal())).resolves.toBeUndefined()
+    await expect(source.matchEnter!(proj('s1'), '/nope', signal())).resolves.toBe('handled')
+    await expect(source.matchEnter!(proj('s1'), '/', signal())).resolves.toBe('handled')
     await expect(source.matchEnter!(proj('s1'), 'plain text', signal())).resolves.toBeUndefined()
+    expect(notices).toEqual([
+      { scope: sid('s1'), level: 'error', text: 'unknown command: /nope' },
+      { scope: sid('s1'), level: 'error', text: '/ does not name a command' },
+    ])
   })
 })
 
@@ -610,6 +743,166 @@ describe('detached admission notices', () => {
     await flush()
     expect(notices).toEqual([])
   })
+
+  it('renders a non-Error transport rejection without escaping the detached task', async () => {
+    const { source, mint, warm, notices } = await bench({ executeTransportFailure: 'wire closed' })
+    mint('s1')
+    await warm(proj('s1'))
+
+    menuPick(source, 'plan', proj('s1'))
+    await flush()
+    expect(notices).toEqual([{ scope: sid('s1'), level: 'error', text: 'wire closed' }])
+  })
+})
+
+describe('client action failures', () => {
+  it('settling one of two action names retains the other single-flight admission', async () => {
+    let releaseWorkflows!: () => void
+    let releaseJobs!: () => void
+    const { command, source, mint, warm } = await bench()
+    command.register(workflowsContribution(() => new Promise<void>((resolve) => { releaseWorkflows = resolve })))
+    command.register({
+      ...workflowsContribution(() => new Promise<void>((resolve) => { releaseJobs = resolve })),
+      name: 'jobs',
+    })
+    mint('s1')
+    await warm(proj('s1'))
+    menuPick(source, 'workflows', proj('s1'))
+    menuPick(source, 'jobs', proj('s1'))
+
+    releaseWorkflows()
+    await Promise.resolve()
+    await Promise.resolve()
+    releaseJobs()
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+
+  it('keeps the token and reports synchronous and asynchronous failures without Host execution', async () => {
+    let failure: 'sync' | 'async' = 'sync'
+    const run = () => {
+      if (failure === 'sync') throw new Error('dashboard unavailable')
+      return Promise.reject(new Error('dashboard failed late'))
+    }
+    const { command, source, mint, warm, notices, executeCalls } = await bench()
+    command.register(workflowsContribution(run))
+    const scope = mint('s1')
+    const consumes: ConsumeTokenRequest[] = []
+    scope.ctx.on('slash/input-consume-token', (request) => {
+      consumes.push(request)
+      return true
+    })
+    await warm(proj('s1'))
+
+    menuPick(source, 'workflows', proj('s1'))
+    expect(notices).toEqual([{ scope: sid('s1'), level: 'error', text: '/workflows failed: Error: dashboard unavailable' }])
+    failure = 'async'
+    await source.matchEnter!(proj('s1'), '/workflows', new AbortController().signal)
+    await vi.waitFor(() => {
+      expect(notices.at(-1)).toEqual({
+        scope: sid('s1'), level: 'error', text: '/workflows failed: Error: dashboard failed late',
+      })
+    })
+    expect(consumes).toEqual([])
+    expect(executeCalls).toEqual([])
+  })
+
+  it('renders a safe fallback when an action throws a value that cannot be coerced', async () => {
+    const hostile = { [Symbol.toPrimitive]: () => { throw new Error('coercion escaped') } }
+    const { command, source, mint, warm, notices } = await bench()
+    command.register(workflowsContribution(() => { throw hostile }))
+    mint('s1')
+    await warm(proj('s1'))
+
+    menuPick(source, 'workflows', proj('s1'))
+    expect(notices).toEqual([{
+      scope: sid('s1'), level: 'error', text: '/workflows failed: [unrenderable thrown value]',
+    }])
+  })
+
+  it('contains action failures when the session has no composer notice service', async () => {
+    const { command, source, mint, warm, notices } = await bench({ conversation: false })
+    command.register(workflowsContribution(() => { throw new Error('not visible') }))
+    mint('s1')
+    await warm(proj('s1'))
+
+    expect(menuPick(source, 'workflows', proj('s1'))).toBe('handled')
+    expect(notices).toEqual([])
+  })
+
+  it('does not consume or notify a replacement scope when an old action settles late', async () => {
+    let release!: () => void
+    const run = vi.fn(() => new Promise<void>((resolve) => { release = resolve }))
+    const { command, source, mint, warm, notices } = await bench()
+    command.register(workflowsContribution(run))
+    const first = mint('s1')
+    const firstConsumes: ConsumeTokenRequest[] = []
+    first.ctx.on('slash/input-consume-token', (request) => {
+      firstConsumes.push(request)
+      return true
+    })
+    await warm(proj('s1'))
+    menuPick(source, 'workflows', proj('s1'))
+
+    await first.fiber.dispose()
+    const replacement = mint('s1')
+    const replacementConsumes: ConsumeTokenRequest[] = []
+    replacement.ctx.on('slash/input-consume-token', (request) => {
+      replacementConsumes.push(request)
+      return true
+    })
+    release()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(firstConsumes).toEqual([])
+    expect(replacementConsumes).toEqual([])
+    expect(notices).toEqual([])
+  })
+
+  it('drops a late action settlement when the session map changes generations without disposing the old scope', async () => {
+    let release!: () => void
+    const { command, source, mint, warm, notices } = await bench()
+    command.register(workflowsContribution(() => new Promise<void>((resolve) => { release = resolve })))
+    const first = mint('s1')
+    const firstConsumes = vi.fn((_request: ConsumeTokenRequest): true => true)
+    first.ctx.on('slash/input-consume-token', firstConsumes)
+    await warm(proj('s1'))
+    menuPick(source, 'workflows', proj('s1'))
+
+    const replacement = mint('s1')
+    const replacementConsumes = vi.fn((_request: ConsumeTokenRequest): true => true)
+    replacement.ctx.on('slash/input-consume-token', replacementConsumes)
+    release()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(firstConsumes).not.toHaveBeenCalled()
+    expect(replacementConsumes).not.toHaveBeenCalled()
+    expect(notices).toEqual([])
+  })
+
+  it('revokes pending action settlement when the command service unloads', async () => {
+    let release!: () => void
+    const { command, source, mint, warm, fiber, notices } = await bench()
+    command.register(workflowsContribution(() => new Promise<void>((resolve) => { release = resolve })))
+    const scope = mint('s1')
+    const consumes: ConsumeTokenRequest[] = []
+    scope.ctx.on('slash/input-consume-token', (request) => {
+      consumes.push(request)
+      return true
+    })
+    await warm(proj('s1'))
+    menuPick(source, 'workflows', proj('s1'))
+
+    await fiber.dispose()
+    release()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(consumes).toEqual([])
+    expect(notices).toEqual([])
+  })
 })
 
 describe('register (contribution face)', () => {
@@ -623,6 +916,18 @@ describe('register (contribution face)', () => {
 })
 
 describe('popupFor', () => {
+  it('composer-focus unbind removes only the currently owned callback', async () => {
+    const { command } = await bench()
+    const first = vi.fn()
+    const second = vi.fn()
+    const unbindFirst = command.bindComposerFocus(sid('s1'), first)
+    const unbindSecond = command.bindComposerFocus(sid('s1'), second)
+    unbindFirst()
+    unbindSecond()
+    expect(first).not.toHaveBeenCalled()
+    expect(second).not.toHaveBeenCalled()
+  })
+
   it('resolves lazily per session; a foreign session gets its own controller; unscoped ctx throws', async () => {
     const { ctx, command, mint } = await bench()
     const a = mint('s1')

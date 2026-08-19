@@ -21,6 +21,12 @@
       "path": "../../core/agent"
     },
     {
+      "path": "../../util/brand"
+    },
+    {
+      "path": "../../util/atomic-write"
+    },
+    {
       "path": "../../core/session"
     },
     {
@@ -28,6 +34,12 @@
     },
     {
       "path": "../../util/home-paths"
+    },
+    {
+      "path": "../../util/output-retention"
+    },
+    {
+      "path": "../../typert/protocol"
     },
     {
       "path": "../workflow"

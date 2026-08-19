@@ -343,12 +343,16 @@ interface ToolArgsMap {
     /** Concrete blocking condition; required only with action blocked. */
     blocked_reason?: string;
   } & Record<string, JsonValue>;
-  /** Run a JavaScript workflow script that orchestrates subagents at scale. Use this for work that fans out across many independent pieces — an audit over many files, a migration, multi-angle research, adversarial verification of findings — where you write the orchestration as a script instead of delegating turn by turn. The workflow's identity rides the `meta` parameter as JSON: required `name` (short kebab-case) and `description` strings, optional `whenToUse` string and `phases` array (`{title, detail?, provider?, model?}`). The `script` parameter is the plain JavaScript body ONLY (NOT TypeScript, and NO `export const meta` statement — meta is a parameter, not code), running with top-level await; end with `return <value>` — the value must be JSON-serializable and is this tool's result. Script-body hooks: - `agent(prompt, opts?): Promise<any>` — run one subagent to completion. Without `opts.schema` it resolves to the child's final text; with `opts.schema` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf — no pattern/format/numeric bounds) it resolves to the validated object. Resolves `null` when the child fails (filter with `.filter(Boolean)`). Other opts: `label` (display), `phase` (progress group), and independent `provider`/`model` LLM target overrides (either may be provided alone). Anything else (`effort`/`isolation`/`agentType`) is rejected loudly. - `pipeline(items, ...stages): Promise<any[]>` — run each item through the stages independently with NO barrier between stages (prefer this for multi-stage work). Each stage receives `(prev, item, index)`. An ordinary stage throw drops that ITEM to `null` and skips its remaining stages. - `parallel(thunks): Promise<any[]>` — run zero-argument functions concurrently and await ALL of them (a barrier; use only when a stage genuinely needs every prior result together). A throwing thunk resolves to `null`. - `phase(title)` — start a progress phase; `log(message)` — narrate progress; `args` — the tool call's `args` input, verbatim. Misused hooks (bad arguments, unknown options, unsupported schemas, tripped caps) throw errors that ALWAYS kill the script — they never dissolve into a per-item `null`. Constraints: concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided — the agents do the work, the script only coordinates them. The run executes in the foreground: this call returns when the whole script finishes. */
+  /** Run a JavaScript workflow script that orchestrates subagents at scale. Use this for work that fans out across many independent pieces — an audit over many files, a migration, multi-angle research, adversarial verification of findings — where you write the orchestration as a script instead of delegating turn by turn. Supply EXACTLY ONE source: `name` (a saved workflow in .dsh/workflows), `script` (an inline plain-JS body, plus the required `meta` object), or `script_path` (a .workflow.json envelope or a script file on disk, plus `meta` for a bare file). The workflow's identity rides `meta` as JSON: required `name` (short kebab-case) and `description` strings, optional `whenToUse` string and `phases` array (`{title, detail?, provider?, model?}`). The script body is plain JavaScript ONLY (NOT TypeScript, and NO `export const meta` statement — meta is data beside the body), running with top-level await. Script-body hooks: - `agent(prompt, opts?): Promise<any>` — run one subagent to completion. Without `opts.schema` it resolves to the child's final text; with `opts.schema` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/minItems/maxItems/enum/const/oneOf — `minItems`/`maxItems` are array-only non-negative integer bounds; no pattern/format/numeric bounds) it resolves to the validated object. Resolves `null` when the child fails (filter with `.filter(Boolean)`). Other opts: `label` (display), `phase` (progress group), and independent `provider`/`model` LLM target overrides (either may be provided alone). Anything else is rejected loudly. - `parallel(items): Promise<any[]>` — run zero-argument functions OR job maps `{prompt, label?, phase?, schema?, provider?, model?}` concurrently and await ALL (a barrier). Failed slots resolve to `null`. - `pipeline(items, ...stages): Promise<any[]>` — run each item through the stages independently with NO barrier between stages. Each stage receives `(prev, item, index)`. - `phase(title)` — start a progress phase; `log(message)` — narrate progress; `args` — the tool call's `args` input, verbatim. - `complete(value)` — end the run successfully with a JSON value (use this instead of `return`). - `await_user(kind, message)` — park the run for a human answer; resume continues past it. `pause(kind, message)` — park a run for a condition resume cannot change; resume re-fires it. Kinds: user, back_off, no_progress, verification, infra. - `budget(): { total, spent, reserved, remaining }` — this run's logical agent budget. `write_scratch_file(name, content)` / `read_scratch_file(name)` — per-run scratch storage (single-component names). Misused hooks (bad arguments, unknown options, unsupported schemas, tripped caps) throw errors that ALWAYS kill the script — they never dissolve into a per-item `null`. Launch is BACKGROUND: the call returns immediately with `{ displayName, runId, script_path, status: "started" }`; the supervisor owns the run and posts the final report to the conversation when it settles. Concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided to the script — the agents do the work, the script only coordinates them. Set `validate_only: true` to smoke-check one canned-host path without launching children. To resume a paused, needs-input, or budget-limited run, supply only `resume_from_run_id` and optionally a higher `agent_budget` for a budget-limited run. */
   workflow: {
-    /** The plain-JS workflow script body (top-level await allowed; NO `export const meta` statement; end with `return <json-value>`). */
-    script: string;
-    /** The workflow identity block (plain JSON — never code). */
-    meta: {
+    /** Saved workflow definition name to launch (one of name/script/script_path). */
+    name?: string;
+    /** The plain-JS workflow script body (top-level await allowed; NO `export const meta` statement). Requires `meta`. */
+    script?: string;
+    /** A .workflow.json envelope or a bare script file on disk to launch. A bare file requires `meta`. */
+    script_path?: string;
+    /** The workflow identity block (plain JSON — never code); required with script or a bare script_path. */
+    meta?: {
       /** Short kebab-case workflow name. */
       name: string;
       /** One-line description of what the workflow does. */
@@ -356,7 +360,7 @@ interface ToolArgsMap {
       /** Optional guidance on when this workflow applies. */
       whenToUse?: string;
       /** Optional phase declarations matched by phase() calls. */
-      phases?: ({
+      phases?: {
         /** The phase title phase() calls match by exact string. */
         title: string;
         /** Optional one-line description of the phase. */
@@ -365,10 +369,16 @@ interface ToolArgsMap {
         provider?: string;
         /** Optional model override this phase is expected to use. */
         model?: string;
-      } & Record<string, JsonValue>)[];
-    } & Record<string, JsonValue>;
+      }[];
+    };
     /** Optional JSON input exposed to the script as the `args` global (wrap a bare list as a field, e.g. {"files": [...]}). */
     args?: Record<string, JsonValue>;
+    /** Smoke-check one canned-host path instead of starting a live run (no children, no run record). */
+    validate_only?: boolean;
+    /** Resume a same-process paused run by its run id; reject combining with name/script/script_path. */
+    resume_from_run_id?: string;
+    /** Absolute logical-agent cap for this run (default 128, allowed 1–1024). */
+    agent_budget?: number;
   } & Record<string, JsonValue>;
   /** Create or fully replace a UTF-8 text file. */
   write: {
@@ -602,9 +612,18 @@ interface ToolOutputMap {
     activation: "armed" | "disarmed";
   };
   workflow: {
+    status: "started";
+    displayName: string;
     runId: string;
-    agentsStarted: number;
-    result: JsonValue;
+    script_path?: string;
+  } | {
+    status: "resumed";
+    displayName: string;
+    runId: string;
+  } | {
+    status: "validated";
+    ok: true;
+    result?: JsonValue;
   };
   write: {
     path: string;

@@ -90,6 +90,15 @@ describe('PopupSelectView', () => {
     expect(rowLabels()).toEqual(['Dark', 'Light', 'Sepia'])
   })
 
+  it('renders the pending options state before the provider settles', async () => {
+    const popup = new PopupSelectController<string>({ consume: () => true, focusComposer: () => {} })
+    render(<PopupSelectView popup={popup} t={t} />)
+    act(() => {
+      popup.open('theme', spec({ options: () => new Promise(() => {}) }), 'ctx-A', SEGMENT)
+    })
+    expect(screen.getByText('正在加载选项…')).toBeTruthy()
+  })
+
   it('typing filters rows locally and rebases the highlight', async () => {
     const options = vi.fn(() => Promise.resolve(OPTIONS))
     const { search } = await mountOpen({ options })

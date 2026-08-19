@@ -2,60 +2,48 @@
 
 English | [中文](README.zh.md)
 
-The workflow seam (`ctx.workflowEngine`) executes a model-written orchestration script that can fan out subagents. The seam defines the script, run, result, error, and event contracts; an engine decides how to isolate and execute the script.
+The holder-owned workflow engine seam (`ctx.workflowEngine`). It validates and executes one model-written orchestration script, exposes a live attempt handle, and emits detached lifecycle snapshots. It does not own saved definitions, detached logical identity, retained history, browser controls, or completion delivery; [`dsh-workflow-supervisor`](../workflow-supervisor/README.md) composes those responsibilities over one or more engine attempts.
 
-`@deepseek-ai/dsh-workflow-worker-thread` is the current engine and `@deepseek-ai/dsh-tool-workflow` is the model-facing consumer. A future process or sandbox engine can replace the implementation without changing the tool.
+`@deepseek-ai/dsh-workflow-worker-thread` is the current provider. One worker thread keeps synchronous script work off the Host event loop and permits bounded termination, but the worker and its vm context are not security boundaries.
 
-The package root is the Host face. The browser-safe `@deepseek-ai/dsh-workflow/types` subpath contains run identities, metadata, results, and observe-only lifecycle payloads without importing `Agent`, Cordis services, or Host context declarations; Host-only `WorkflowStartRequest` and `WorkflowRun` live behind the package root.
+The package root is the Host face. Browser-safe identities, metadata, results, and observe-only payloads live at `@deepseek-ai/dsh-workflow/types`; `WorkflowStartRequest`, `WorkflowJournalEntry`, and the holder-owned `WorkflowRun` remain on the Host face.
 
-## Service and run contract
+## Service and attempt contract
 
-`WorkflowEngine.start(request): WorkflowRun` validates enough synchronously to reject a malformed meta block, unparseable script, unavailable provider route, or unsupported per-run limit before a run exists. Once returned, `WorkflowRun.result` never rejects: execution failures resolve with `stopReason: 'error'`, and cancellation resolves with `cancelled` within the engine's bounded grace.
+`WorkflowEngine.start(request): WorkflowRun` rejects before publication when metadata, script syntax, provider routing, limits, journal entries, or cumulative spend are invalid. A returned handle owns one engine attempt. Its `result` never rejects: script and infrastructure failures resolve with `stopReason: 'error'`, and cancellation resolves with `cancelled` within the provider's configured grace.
 
-A run is holder-owned. Engine-plugin unload prevents new starts but does not revoke accepted runs. The holder must call `dispose()` on every path; disposal cancels remaining work and reaches or abandons quiescence within the documented bound.
+The holder must call idempotent `dispose()` on every path. Disposal cancels unfinished work and waits for bounded script and child cleanup. Engine-plugin unload prevents new starts without revoking accepted handles.
 
-`WorkflowStartRequest` contains `{ meta, script, args?, subagentProvider?, maxTotalAgents?, parent, signal? }`. `parent` attributes every child agent to the invoking agent. `subagentProvider` optionally routes every child in that run without exposing provider choice to the script; omission uses the engine's configured provider. `maxTotalAgents` optionally lowers the engine's deployment ceiling for one run and is likewise invisible to the script. An implementation rejects invalid routes and limits synchronously. `meta` and `args` are plain data, not script fragments.
+`WorkflowStartRequest` carries script, metadata, args, parent Agent, optional provider and total-agent limit, optional cancellation, scratch directory, smoke-check mode, cumulative `initialAgentSpend` and `initialAgentSeq`, and committed `WorkflowJournalEntry` values. Cumulative fields let a logical-run owner preserve budgets and unique member sequences across attempts. Each journal entry identifies one committed host call by kind, consecutive commit-publication ordinal, stable call id, and fingerprint. Concurrent calls are ordered when they commit, so published entries form one gap-free increasing sequence across attempts; a replay request supplies that order. Replay returns retained child or scratch-read results, suppresses repeated observer and scratch-write effects, restores phase state, skips satisfied human gates, and rejects a changed call.
 
-`WorkflowRun` exposes `{ id, meta, result, cancel(reason?), dispose() }`. `WorkflowResult` contains `{ value, stopReason, error?, agentsStarted }`; `value` is plain JSON data or `null`.
+`WorkflowRun` exposes `id`, validated `meta`, non-rejecting `result`, `cancel()`, live-gate `resume()`, and `dispose()`. `WorkflowResult.agentsStarted` is the cumulative logical spend supplied to and observed by the attempt; `errorCode` preserves a machine-routable fatal `WorkflowError` code.
 
-## Events
+## Observe-only events
 
-Workflow events are observe-only. They carry `WorkflowRunInfo` (`id` plus `meta`) rather than the live run, so listeners cannot acquire cancellation or disposal authority.
+Every `workflow/*` payload is an independent lossless-JSON snapshot. Listener failure is logged and contained, and one listener cannot mutate the engine, the holder's result, or another listener's payload.
 
-- `workflow/start` / `workflow/end` pair the run.
-- `workflow/phase` and `workflow/log` expose script narration.
-- `workflow/agent-start` / `workflow/agent-end` pair each child call by `seq`; a child whose async provider start rejects emits neither.
+- `workflow/start` / `workflow/end` pair one engine attempt; the ending omits the result value.
+- `workflow/phase`, `workflow/log`, and `workflow/gate` report script progress and parking.
+- `workflow/agent-start` / `workflow/agent-end` pair a published child by attempt-wide member sequence.
+- `workflow/journal-commit(info, entry)` reports one committed `WorkflowJournalEntry`; replayed calls emit no new entry.
 
-Same-process event payloads are borrowed immutable values. Every listener is independently contained: a synchronous throw or rejected returned promise is logged without starving peers or changing execution.
+These events grant no cancellation, resume, or disposal authority. A logical owner correlates them by the attempt id and decides what persists.
 
 ## Failure discipline
 
-`WorkflowError` carries a code and a `fatal` flag. Fatal errors always escape `parallel()` and `pipeline()` instead of becoming an ordinary per-item `null`:
-
-- `SCRIPT_PARSE` / `META_INVALID` — the workflow cannot start.
-- `INVALID_ARGUMENT` / `UNSUPPORTED_OPTION` / `UNSUPPORTED_SCHEMA` — a hook call violates the engine contract.
-- `AGENT_CAP` / `ITEM_CAP` — configured safety limits were exceeded.
-- `AGENT_START` — the provider's async start rejected.
-- `AGENT_RESULT` — a published child's result rejected with an infrastructure fault.
-- `RESULT_UNSERIALIZABLE` — a script/worker value is not plain JSON data.
-- `CANCELLED` — cancellation owns the run and pending/future hooks reject.
-
-A child that resolves normally with a non-completed stop reason is not an infrastructure exception: `agent()` returns `null`, allowing the script to handle an ordinary child failure.
+Fatal `WorkflowError` codes always escape `parallel()` and `pipeline()` instead of becoming an ordinary item `null`: parse and metadata failures, invalid arguments, unsupported options or schemas, configured caps, provider start/result faults, unserializable values, journal divergence, and cancellation. A child that settles normally with a non-completed reason remains an ordinary child failure, so `agent()` returns `null` for script-level handling.
 
 ## Model Experience
 
-Indirectly, through `dsh-tool-workflow` and a workflow engine, which create child-agent requests and return a retained parent tool result.
+Indirectly, through child Agent requests started by the engine; consumers own model-visible tool schemas, launch results, durable records, and completion notices.
 
 #### KV Cache effect
 
-No direct invalidation; the named consumer owns any request-prefix changes.
+No direct effect; model-visible consumers own request-prefix and history changes.
 
 ## Known Limitations and Deferred Work
 
-- **Foreground collection only** — the caller owns one live run and awaits it; background start/poll, spill handles, and detached collection are deferred.
-- **No journaling or resume** — scripts, child progress, and intermediate values are not checkpointed, so a process restart cannot continue a run.
-- **No saved or nested workflows** — the seam starts caller-supplied scripts only, and a workflow script receives no `workflow()` hook for recursive orchestration.
-- **No token-budget vocabulary** — engines cap concurrency, items, and children, but neither the request nor result accounts for model tokens across children.
-- **Runs are holder-owned, not service-tracked** — unloading the engine does not discover independent live handles; every consumer must dispose the run it started.
-
-See the [dynamic-workflows Agent Note](../../../.agents/notes/implemented/feature/2026-07-05-dynamic-workflows.md) for the deferred workflow API.
+- The seam owns one live attempt, not a detached run registry. Callers needing background lifecycle use `ctx.workflowSupervisor` rather than leaving handles unowned.
+- Journals checkpoint committed host-call results, not arbitrary JavaScript state or external side effects. Replay requires deterministic call identity and idempotent uncommitted effects.
+- A workflow script cannot launch another workflow. It composes child Agents through `agent()` only.
+- Budget counts admitted child launches, not provider tokens.

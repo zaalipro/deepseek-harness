@@ -405,7 +405,7 @@ Post-policy may replace either content or value, never both. Content replacement
 
 ## The enforced raw JSON Schema subset
 
-Raw schemas from subagents, workflows, MCP, and dynamic registrations use the wire-level counterpart of the author DSL. `assertSupportedJsonSchema()` accepts any JSON root, `validateJsonSchemaValue()` enforces it, and `JsonSchemaError` reports every unsupported or malformed schema path. The empty annotation-only node means unconstrained lossless JSON. `oneOf` requires at least two branches and a value must match exactly one. Consumers that still require an object root call `assertObjectJsonSchema()` and carry `ObjectJsonSchema`; this is how subagent/workflow caller-defined structured output remains object-rooted without restricting the shared vocabulary.
+Raw schemas from subagents, workflows, MCP, and dynamic registrations use the wire-level counterpart of the author DSL. `assertSupportedJsonSchema()` accepts any JSON root, `validateJsonSchemaValue()` enforces it, and `JsonSchemaError` reports every unsupported or malformed schema path. Arrays accept inclusive non-negative integer `minItems`/`maxItems` bounds, with the minimum no greater than the maximum. The empty annotation-only node means unconstrained lossless JSON. `oneOf` requires at least two branches and a value must match exactly one. Consumers that still require an object root call `assertObjectJsonSchema()` and carry `ObjectJsonSchema`; this is how subagent/workflow caller-defined structured output remains object-rooted without restricting the shared vocabulary.
 
 ```ts type-equiv
 /** Scalar JSON values supported by `enum` and `const`. */
@@ -436,6 +436,10 @@ interface JsonSchemaNode {
   additionalProperties?: boolean
   /** Item schema (`type: 'array'` only); absent accepts any JSON item. */
   items?: JsonSchemaNode
+  /** Inclusive non-negative minimum array length (`type: 'array'` only); it cannot exceed `maxItems`. */
+  minItems?: number
+  /** Inclusive non-negative maximum array length (`type: 'array'` only); it cannot be below `minItems`. */
+  maxItems?: number
   /** Allowed values for a scalar node. */
   enum?: JsonSchemaScalar[]
   /** The single allowed value for a scalar node. */

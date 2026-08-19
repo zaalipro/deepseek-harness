@@ -8,6 +8,7 @@ import type {
 } from '@deepseek-ai/dsh-api-remotes/client'
 import { RpcId } from '@deepseek-ai/dsh-client-connection/client'
 import type { SessionRemotes } from '../src/client/sessions/remotes.ts'
+import type { WorkflowRunsRemote } from '../src/client/workflow-runs/controller.ts'
 
 /** Programmable-default workspace row (branded id, ISO-ish times). */
 function fakeWorkspace(id: string, over: Partial<WorkspaceView> = {}): WorkspaceView {
@@ -66,6 +67,30 @@ export function fakeRemote(): SessionRemotes {
       list: () => Promise.resolve({ ok: true, value: [] }),
       execute: () => Promise.resolve({ ok: true, value: undefined }),
     },
+  }
+}
+
+/** Empty bounded workflow-runs Remote used by runtime composition tests. */
+export function fakeWorkflowRunsRemote(): WorkflowRunsRemote {
+  const unavailable = () => Promise.reject(new Error('unexpected workflow-runs detail call'))
+  return {
+    list: () => Promise.resolve({
+      ok: true,
+      value: {
+        epoch: 'fake-workflow-epoch' as never,
+        sessionRevision: 0,
+        items: [],
+        total: 0,
+      },
+    }),
+    detail: unavailable,
+    members: unavailable,
+    memberDetail: unavailable,
+    logs: unavailable,
+    result: unavailable,
+    artifacts: unavailable,
+    artifact: unavailable,
+    control: unavailable,
   }
 }
 

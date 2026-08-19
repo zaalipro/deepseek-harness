@@ -14,7 +14,6 @@ import {
   contentBlockSchema, messageIdSchema, sessionEventSchema, sessionIdSchema, toolEventViewSchema,
 } from './sessions.schema.ts'
 import { taskViewSchema } from './jobs.schema.ts'
-import { workflowRunViewSchema } from './workflow-runs.schema.ts'
 import { workspaceIdSchema, workspaceViewSchema } from './workspace.schema.ts'
 
 /** Question fields validated strictly against core dsh-user-questions. */
@@ -61,7 +60,6 @@ export const muxFrameSchema = z.discriminatedUnion('type', [
     })),
   }),
   z.object({ type: z.literal('session/jobs'), sessionId: sessionIdSchema, jobs: z.array(taskViewSchema) }),
-  z.object({ type: z.literal('session/workflow-runs'), sessionId: sessionIdSchema, runs: z.array(workflowRunViewSchema) }),
   // value stays wide: it already passed its unit's own schema on the host,
   // and deep-validating here would import every domain's schema into the carrier.
   z.object({ type: z.literal('session/projection'), sessionId: sessionIdSchema, key: z.string().min(1), value: z.unknown(), seq: z.number().int().nonnegative() }),

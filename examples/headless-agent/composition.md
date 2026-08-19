@@ -46,6 +46,16 @@ flowchart LR
   cfg --> plugin_headless_tool_subagent_fork
   plugin_headless_workflow_worker_thread["workflow-worker-thread<br/>@deepseek-ai/dsh-workflow-worker-thread"]
   cfg --> plugin_headless_workflow_worker_thread
+  plugin_headless_workflow_registry["workflow-registry<br/>@deepseek-ai/dsh-workflow-registry"]
+  cfg --> plugin_headless_workflow_registry
+  plugin_headless_workflow_supervisor["workflow-supervisor<br/>@deepseek-ai/dsh-workflow-supervisor"]
+  cfg --> plugin_headless_workflow_supervisor
+  plugin_headless_workflow_run_recorder["workflow-run-recorder<br/>@deepseek-ai/dsh-workflow-run-recorder"]
+  cfg --> plugin_headless_workflow_run_recorder
+  plugin_headless_user_questions["user-questions<br/>@deepseek-ai/dsh-user-questions"]
+  cfg --> plugin_headless_user_questions
+  plugin_headless_workflow_user_questions["workflow-user-questions<br/>@deepseek-ai/dsh-workflow-user-questions"]
+  cfg --> plugin_headless_workflow_user_questions
   plugin_headless_tool_workflow["tool-workflow<br/>@deepseek-ai/dsh-tool-workflow"]
   cfg --> plugin_headless_tool_workflow
   plugin_headless_tool_ralph["tool-ralph<br/>@deepseek-ai/dsh-tool-ralph"]
@@ -81,6 +91,11 @@ flowchart LR
 | `tool-subagent` | `@deepseek-ai/dsh-tool-subagent` |
 | `tool-subagent-fork` | `@deepseek-ai/dsh-tool-subagent` |
 | `workflow-worker-thread` | `@deepseek-ai/dsh-workflow-worker-thread` |
+| `workflow-registry` | `@deepseek-ai/dsh-workflow-registry` |
+| `workflow-supervisor` | `@deepseek-ai/dsh-workflow-supervisor` |
+| `workflow-run-recorder` | `@deepseek-ai/dsh-workflow-run-recorder` |
+| `user-questions` | `@deepseek-ai/dsh-user-questions` |
+| `workflow-user-questions` | `@deepseek-ai/dsh-workflow-user-questions` |
 | `tool-workflow` | `@deepseek-ai/dsh-tool-workflow` |
 | `tool-ralph` | `@deepseek-ai/dsh-tool-ralph` |
 | `tool-todo` | `@deepseek-ai/dsh-tool-todo` |

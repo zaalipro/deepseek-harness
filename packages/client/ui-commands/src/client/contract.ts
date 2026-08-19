@@ -1,7 +1,7 @@
 /**
  * Frozen contract of the client command surface. Types only. The
  * CommandUiRuntime (`ctx.commandUi`) implements this face; business packages
- * consume `register` alone.
+ * consume only `register` and `decorate`.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ClientSessionContext } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
@@ -31,11 +31,30 @@ export interface SelectOption {
  * The shell component is owned by ui-commands; business never sees it. Both
  * callbacks receive the ClientSessionContext captured at popup open.
  */
-export type CommandUiSpec = {
+export interface PopupSelectCommandUiSpec {
   readonly kind: 'popupSelect'
   options(session: ClientSessionContext, signal: AbortSignal): Promise<readonly SelectOption[]>
   onSelect(option: SelectOption, session: ClientSessionContext): void | Promise<void>
 }
+
+/**
+ * Browser-owned action invoked by a bare client command. The command source
+ * consumes the exact token only after the action settles successfully; a
+ * thrown or rejected action leaves the token in place and reports the error
+ * through the session's composer notice channel.
+ */
+export interface ActionCommandUiSpec {
+  readonly kind: 'action'
+  /**
+   * Run the browser-owned action.
+   * @param session - projection of the session whose command token invoked the action.
+   * @returns optional settlement; the command token remains until it fulfills.
+   */
+  run(session: ClientSessionContext): void | Promise<void>
+}
+
+/** Client-owned command behavior supported by the slash-command source. */
+export type CommandUiSpec = PopupSelectCommandUiSpec | ActionCommandUiSpec
 
 /**
  * One client-owned command contribution: a slash-menu entry whose behavior
@@ -50,7 +69,7 @@ export interface CommandContribution {
   readonly description: string
   /** Capability filter, called with a fresh projection per candidate pass. */
   available(session: ClientSessionContext): boolean
-  /** The command's UI behavior (this phase: popupSelect only). */
+  /** Browser behavior for the bare command token. */
   readonly ui: CommandUiSpec
 }
 
@@ -68,8 +87,8 @@ export interface CommandDecoration {
   readonly name: string
   /** Capability filter, called with a fresh projection per bare invocation. */
   available(session: ClientSessionContext): boolean
-  /** The bare-invocation UI (this phase: popupSelect only). */
-  readonly ui: CommandUiSpec
+  /** The bare-invocation popup UI. Host command actions must stay on the Host. */
+  readonly ui: PopupSelectCommandUiSpec
 }
 
 /** The `ctx.commandUi` service face visible to business packages. */

@@ -252,7 +252,6 @@ export class PopupSelectController<TCtx = unknown> {
   /** Run the business settlement for an already admitted option. */
   private async settle(binding: OpenBinding<TCtx>, option: SelectOption): Promise<void> {
     const s = this.state.getSnapshot()
-    if (this.binding !== binding || !s.open || s.submitting) return
     this.state.set({ ...s, submitting: true, confirming: null, acknowledged: false, error: null })
     try {
       await binding.spec.onSelect(option, binding.context)

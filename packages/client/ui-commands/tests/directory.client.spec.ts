@@ -254,6 +254,13 @@ describe('ensureReady (per key)', () => {
     await expect(wait).rejects.toThrow('command directory warmup failed: warmup boom')
   })
 
+  it('renders a non-Error pull rejection in the warmup failure', async () => {
+    const { dir, pull } = bench()
+    const wait = dir.ensureReady(S1, signal())
+    pull(S1, 0).reject('transport closed')
+    await expect(wait).rejects.toThrow('command directory warmup failed: transport closed')
+  })
+
   it('retries from failed state with a fresh pull', async () => {
     const { dir, pull } = bench()
     const first = dir.ensureReady(S1, signal())
@@ -270,6 +277,14 @@ describe('ensureReady (per key)', () => {
     const wait = dir.ensureReady(S1, ac.signal)
     ac.abort(new Error('attempt superseded'))
     await expect(wait).rejects.toThrow('attempt superseded')
+  })
+
+  it('normalizes a non-Error abort reason', async () => {
+    const { dir } = bench()
+    const ac = new AbortController()
+    const wait = dir.ensureReady(S1, ac.signal)
+    ac.abort('superseded')
+    await expect(wait).rejects.toThrow('command directory wait aborted')
   })
 
   it('rejects immediately on an already-aborted signal', async () => {

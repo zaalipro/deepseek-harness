@@ -13,6 +13,7 @@ import type {} from '@deepseek-ai/dsh-credentials/types'
 import type {} from '@deepseek-ai/dsh-llm/types'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import type {} from '@deepseek-ai/dsh-settings/types'
+import type {} from '@deepseek-ai/dsh-workflow-supervisor/types'
 
 export {
   ApiRemoteSessionNotFound,
@@ -27,6 +28,7 @@ export type {
   ApiRemoteAgentResult,
   ApiRemoteLookupError,
 } from './agent-lookup.ts'
+export type { WorkflowRunChange } from '@deepseek-ai/dsh-workflow-supervisor/types'
 export { API_REMOTE_FORWARDED_EVENTS } from './remote-events.ts'
 export type { ApiRemoteForwardedEvent } from './types.ts'
 

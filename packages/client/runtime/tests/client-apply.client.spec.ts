@@ -14,7 +14,7 @@ import type { ConversationNodeDefinition } from '../src/client/contract/conversa
 import { Session } from '../src/client/sessions/session.ts'
 import type { SessionRuntime } from '../src/client/sessions/service.ts'
 import type { WorkspaceRuntime } from '../src/client/workspaces/service.ts'
-import { FakeApiClient, fakeRemote, ok } from './fake-api.client.ts'
+import { FakeApiClient, fakeRemote, fakeWorkflowRunsRemote, ok } from './fake-api.client.ts'
 
 interface Bench {
   ctx: Context
@@ -44,8 +44,9 @@ async function mount(): Promise<Bench> {
     },
   }
   ctx.reflect.provide('connection', handle)
-  ctx.reflect.provide('remote', {})
+  ctx.reflect.provide('remote', { $on: () => () => {} })
   ctx.reflect.provide('remote.commands', fakeRemote().commands)
+  ctx.reflect.provide('remote.workflowRuns', fakeWorkflowRunsRemote())
   await ctx.plugin(RuntimeClient).await()
   return bench
 }

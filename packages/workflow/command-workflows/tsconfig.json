@@ -21,6 +21,9 @@
       "path": "../../llm/llm"
     },
     {
+      "path": "../../core/agent"
+    },
+    {
       "path": "../../interaction/commands"
     },
     {
@@ -28,6 +31,9 @@
     },
     {
       "path": "../workflow-registry"
+    },
+    {
+      "path": "../workflow-run-recorder"
     },
     {
       "path": "../workflow-supervisor"

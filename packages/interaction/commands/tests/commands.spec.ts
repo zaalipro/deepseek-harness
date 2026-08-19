@@ -103,6 +103,22 @@ describe('CommandRuntime', () => {
     expect((await ctx.commands.execute(agent, '/shared', new AbortController().signal))?.result.text).toBe('global')
   })
 
+  it('lets ordinary built-ins continuously override scoped fallback aliases', async () => {
+    const ctx = await mount()
+    const { scope, agent } = await mintAgentScope(ctx, 'a')
+    scope.ctx.commands.registerFallback(command('shared', 'workflow alias'))
+    expect((await ctx.commands.execute(agent, '/shared', new AbortController().signal))?.result.text)
+      .toBe('workflow alias')
+
+    const disposeBuiltIn = ctx.commands.register(command('shared', 'built-in'))
+    expect((await ctx.commands.execute(agent, '/shared', new AbortController().signal))?.result.text)
+      .toBe('built-in')
+
+    disposeBuiltIn()
+    expect((await ctx.commands.execute(agent, '/shared', new AbortController().signal))?.result.text)
+      .toBe('workflow alias')
+  })
+
   it('removes a registration when its contributing plugin fiber is disposed', async () => {
     const ctx = await mount()
     const { agent } = await mintAgentScope(ctx, 'a')

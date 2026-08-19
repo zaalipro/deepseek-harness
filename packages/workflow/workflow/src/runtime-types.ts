@@ -7,21 +7,63 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { JsonValue } from '@deepseek-ai/dsh-session/types'
 import type {
   WorkflowMeta, WorkflowResult, WorkflowRunId,
 } from './types.ts'
 
-/**
- * One committed host-call result replayed on a same-process resume. Control
- * flow must derive from `args` + host results, so the 1-based call sequence
- * identifies every replayed call deterministically across re-executions.
- */
-export interface WorkflowJournalEntry {
-  /** 1-based `agent()` call sequence; a replayed call returns this result without launching a child. */
-  readonly seq: number
-  /** The committed script-visible result (text, structured object, or `null` for a failed child). */
-  readonly result: unknown
+/** Fields shared by every committed host call replayed on same-process resume. */
+interface WorkflowJournalBase {
+  /** Consecutive commit-publication position in the logical run's journal. */
+  readonly ordinal: number
+  /** Deterministic call identity derived from nested combinator and item positions. */
+  readonly callId: string
+  /** SHA-256 of the call kind plus its effective arguments. */
+  readonly fingerprint: string
 }
+
+/**
+ * One committed host call replayed on a same-process resume. Result-producing
+ * calls return their retained value; committed effects are suppressed; phase
+ * replay still restores the worker's current phase without emitting duplicate
+ * observer narration.
+ */
+export type WorkflowJournalEntry = WorkflowJournalBase & (
+  | {
+    /** A settled `agent()` call. */
+    readonly kind: 'agent'
+    /** Monotonic member sequence assigned to the original launched child. */
+    readonly seq: number
+    /** The committed script-visible result (text, structured object, or `null` for a failed child). */
+    readonly result: JsonValue
+  }
+  | {
+    /** A committed `phase()` observer effect. */
+    readonly kind: 'phase'
+    /** The phase title restored on replay and emitted only on the first attempt. */
+    readonly title: string
+  }
+  | {
+    /** A committed `log()` observer effect. */
+    readonly kind: 'log'
+    /** The log line emitted only on the first attempt. */
+    readonly message: string
+  }
+  | {
+    /** A committed `read_scratch_file()` result. */
+    readonly kind: 'scratch-read'
+    /** File content; absent means the file did not exist. */
+    readonly content?: string
+  }
+  | {
+    /** A committed `write_scratch_file()` effect. */
+    readonly kind: 'scratch-write'
+  }
+  | {
+    /** A satisfied `await_user()` gate that must not re-fire on a later journal resume. */
+    readonly kind: 'await-user'
+  }
+)
 
 /**
  * What a caller asks for when starting a workflow run. `meta` and `args` are
@@ -39,7 +81,11 @@ export interface WorkflowStartRequest {
   subagentProvider?: string
   /** Optional per-run total-child ceiling. */
   maxTotalAgents?: number
-  /** Committed host-call results to replay instead of relaunching children; omitted for a fresh start. */
+  /** Cumulative agent budget already spent by earlier attempts of the same logical run. */
+  initialAgentSpend?: number
+  /** Highest member sequence issued by earlier attempts; keeps retry members distinct. */
+  initialAgentSeq?: number
+  /** Committed host calls to replay instead of repeating results or effects; omitted for a fresh start. */
   journal?: readonly WorkflowJournalEntry[]
   /** Absolute run directory owning per-run scratch files; omitted when scratch is unavailable. */
   scratchDir?: string

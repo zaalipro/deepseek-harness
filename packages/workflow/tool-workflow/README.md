@@ -2,30 +2,31 @@
 
 English | [中文](README.zh.md)
 
-The model-facing **`workflow` tool**: run a JavaScript orchestration script that fans out subagents, and return the script's final value. This package owns the model-facing schema and run lifecycle over [`ctx.workflowEngine`](../workflow/README.md); script parsing, execution, caps, and cancellation live behind the seam, while the consumer retains ownership of the parent-facing schema and result envelope.
+The model-facing **`workflow` tool** launches JavaScript orchestration scripts through `ctx.workflowSupervisor`. This package owns the model-facing schema, source resolution, and immediate launch result. It attributes root launches to [`ctx.workflowRunRecorder`](../workflow-run-recorder/README.md), whose source-neutral recorder owns the durable top-level Chat projection. Definition discovery, background execution, pause/resume, caps, retained results, and completion delivery remain behind the [workflow capability](../workflow/README.md).
 
 ## What the model sees
 
-Three parameters: `meta` (required identity data: `name`, `description`, and optional progress annotations), `script` (required plain JavaScript body — no `export const meta` statement; the tool description carries the complete authoring contract), and `args` (optional JSON object exposed to the script as the `args` global; wrap a bare list in a field so the wire schema stays honest). The plugin also contributes a `tool:<toolName>` system-prompt section carrying the usage policy — use the tool only on an explicit user ask for a workflow / large orchestration; prefer plain subagent calls for one or two delegations — per the convention that tool guidance ships with the tool plugin, never in the deployment persona.
+Exactly one launch source is required: `name` for a saved definition, `script` plus `meta` for an inline plain-JavaScript body, or `script_path` for a definition envelope or editable script. Saved names and relative file paths resolve from the calling Session's `cwd`; `script_path` uses `ctx.fs.readBytesNoFollow`, so final-link rejection, regular-file validation, and the bounded read share one provider-owned descriptor or equivalent object. Optional `args` is the JSON object exposed as the `args` global. `validate_only` smoke-checks one canned-host path without creating a run. `resume_from_run_id` resumes one same-process logical run and accepts a higher `agent_budget` only when the previous attempt reached its cap. The plugin also contributes a `tool:<toolName>` system-prompt section carrying the usage policy: use the tool only on an explicit workflow or large-orchestration request; prefer plain subagent calls for one or two delegations.
 
 ## Lifecycle
 
-Collection is synchronous (like [`dsh-tool-subagent`](../../subagent/tool-subagent/README.md)): `execute` starts a run and awaits `run.result` inside a `try/finally` that always disposes the run, so the script and its children reach quiescence on every path. `exec.signal` is bridged to `run.cancel()` (including the already-aborted-before-start case). A non-`completed` stop reason maps to an `isError` result reporting the reason—never partial output as success; a parse/meta failure thrown synchronously by `start()` becomes an `isError` the model can correct from. Completion returns canonical `{ runId, agentsStarted, result }`; the Native renderer preserves the meta name, agent count, and JSON value, truncating only that projection at `maxResultChars`.
+Launch is background work. A successful call returns `{ status: "started", displayName, runId, script_path? }` after the supervisor publishes the run; the parent turn does not await script completion. The supervisor owns cancellation, attempt disposal, completion delivery, and retained dashboard data. `validate_only` instead waits for the smoke-check result and creates no run, Chat node, or dashboard row.
 
-For a root transport execution (`exec.parent` absent), the tool also projects the run into the calling Agent's Session: run-start after `start()` returns, matching member starts and endings filtered by `run.id`, then run-end only after `run.result` is available and `dispose()` has reached quiescence. Nested transport calls execute normally but write no workflow record. The first failed Session append disables later recording for that run, emits one warning, and leaves either no record or a legal continuous prefix without changing the tool result or cleanup.
+For a root transport execution (`exec.parent` absent), the tool attributes its one supervisor start to the calling Agent's Session through `ctx.workflowRunRecorder.launch(...)`. The recorder projects the supervisor's logical lifecycle into that Session: the stable supervised run id opens one `tool-workflow/run-start`; logical member events from every pause/resume attempt append to that record; one `tool-workflow/run-end` arrives only after terminal attempt disposal. A paused, needs-input, or budget-limited attempt does not close the record. Process or owner interruption closes it with `stopReason: "interrupted"`. Nested transport calls execute normally but write no workflow record. The first failed Session append disables later recording for that run, emits one warning, and leaves either no record or a legal continuous prefix without changing execution.
 
-The browser-safe `@deepseek-ai/dsh-tool-workflow/types` subpath owns these four log-only event payloads and their `SessionEventMap` declaration. The package invariant rejects duplicate starts, unpaired members, terminal events with open members, and updates after run-end on both cold load and live append while accepting missing terminal suffixes.
+The browser-safe `@deepseek-ai/dsh-workflow-run-recorder/types` subpath owns these four log-only event payloads and their `SessionEventMap` declaration. The recorder package invariant rejects duplicate starts, unpaired members, terminal events with open members, and updates after run-end on both cold load and live append while accepting missing terminal suffixes.
 
 ## Render intent
 
-Decided up front (per the [render-intent Agent Note](../../../.agents/notes/implemented/architecture/2026-07-02-tool-render-intent-union.md)): a `generic` card titled `workflow: <meta.name>`, read directly from `args.meta.name` (presentation is a pure function of args and does not ask the engine to parse); the script text rides as `rawInput`. The result keeps the generic card.
+Decided up front (per the [render-intent Agent Note](../../../.agents/notes/implemented/architecture/2026-07-02-tool-render-intent-union.md)): a `generic` card titled from `args.name`, then `args.meta?.name`, then the fixed `workflow` fallback (presentation is a pure function of args and does not ask a provider to parse); the script text rides as `rawInput`. The result keeps the generic card.
 
 ## Config
 
 | Key | Default | Meaning |
 |---|---|---|
 | `toolName` | `workflow` | The model-facing tool name to register. |
-| `maxResultChars` | `50000` | Rendered-result ceiling; longer JSON is truncated with a notice. |
+| `maxResultChars` | `50000` | Rendered validate-only result ceiling; longer JSON is truncated with a notice. |
+| `maxDefinitionBytes` | `1048576` | Maximum UTF-8 bytes accepted from one inline script or `script_path`. |
 
 ## Model Experience
 
@@ -67,11 +68,11 @@ Prefix-stable while `toolName`, definition, and visibility are unchanged. Renami
 
 #### What the model sees
 
-The full model-written script, metadata, and args remain in the assistant tool call. Success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON; a cap adds `… [truncated: <omitted> more characters]` on a new line. Failures are exactly `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`, `Error: workflow run failed: <error-or-unknown error>`, or defensively `Error: workflow run ended abnormally (<reason>)`; a call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages are omitted.
+The full model-written script, metadata, and args remain in the assistant tool call. A live launch renders compact JSON containing `status`, `displayName`, logical `runId`, and optional `script_path`; resume renders the same stable identity with `status: "resumed"`. The Host's slash-command acknowledgement remains human-readable and UUID-free. The supervisor later posts the terminal result or scratch report independently. A validate-only call reports the bounded smoke-check result. A call without an owning agent fails with `workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages are omitted.
 
 #### Token effect
 
-Call tokens can be large and remain until compaction. Result rendering is capped by `maxResultChars`; child-model tokens are separate from the parent's retained context.
+Call tokens can be large and remain until compaction. Validate-only rendering is capped by `maxResultChars`; child-model tokens are separate from the parent's retained context.
 
 #### KV Cache effect
 
@@ -79,7 +80,8 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 ## Known Limitations and Deferred Work
 
-- **The parent turn blocks until the whole workflow settles** — there is no background start/poll API, and cancellation discards partial output as an error.
-- **`args` must be an object and Native result text is bounded** — callers wrap top-level arrays/scalars in a field; the canonical workflow result remains complete, while JSON beyond `maxResultChars` is truncated in the model-facing projection rather than stored behind a retrieval handle.
-- **Workflow policy is fixed per tool registration** — provider selection, caps, and tool name are deployment config, not model-call arguments.
-- **Durable records are top-level and observational** — nested Code Mode dispatches are not recorded, and a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
+- **`args` must be an object** — callers wrap top-level arrays or scalars in a field.
+- **Validate-only follows one canned path** — it does not enumerate branches or exercise live child tools.
+- **Cross-process resume is unavailable** — active runs recovered after restart are terminal Interrupted rows.
+- **Durable records are top-level and observational** — nested transport dispatches are not recorded, and a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
+- **Local Windows file sources are unavailable** — the local provider cannot safely implement final-component no-follow reads on Windows, so `script_path` and registry-backed `name` sources fail loud with `FS_IO_ERROR`; inline `script` sources remain available.

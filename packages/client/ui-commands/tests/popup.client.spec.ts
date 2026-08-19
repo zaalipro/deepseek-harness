@@ -107,6 +107,19 @@ describe('open and options load', () => {
     expect(s.options).toEqual(OPTIONS)
   })
 
+  it('a reopen drops a stale options rejection without publishing its error', async () => {
+    const popup = new PopupSelectController<Ctx>(makeDeps())
+    let rejectFirst!: (reason: unknown) => void
+    popup.open('alpha', spec({
+      options: () => new Promise((_resolve, reject) => { rejectFirst = reject }),
+    }), CTX_A, SEGMENT)
+    popup.open('beta', spec(), CTX_A, SEGMENT)
+    rejectFirst(new Error('stale failure'))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(popup.state.getSnapshot()).toMatchObject({ command: 'beta', status: 'ready', error: null })
+  })
+
   it('dispose aborts the flying load, clears state, and drops the late arrival', async () => {
     const popup = new PopupSelectController<Ctx>(makeDeps())
     let signal!: AbortSignal
@@ -142,6 +155,14 @@ describe('open and options load', () => {
     await Promise.resolve()
     expect(popup.state.getSnapshot()).toMatchObject({ status: 'ready', options: OPTIONS, search: 'da' })
     expect(attempts).toBe(2)
+  })
+
+  it('renders a non-Error options failure', async () => {
+    const { popup } = await readyPopup({
+      // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- arbitrary provider rejection is the case under test.
+      options: () => Promise.reject('directory closed'),
+    })
+    expect(popup.state.getSnapshot()).toMatchObject({ status: 'failed', error: 'directory closed' })
   })
 
   it('retry is a no-op unless the options load failed', async () => {
@@ -211,6 +232,14 @@ describe('search / move / highlight over the filtered list', () => {
 })
 
 describe('select', () => {
+  it('confirmation controls ignore calls while no gate is active', () => {
+    const popup = new PopupSelectController<Ctx>(makeDeps())
+    const before = popup.state.getSnapshot()
+    popup.acknowledge(true)
+    popup.cancelConfirmation()
+    expect(popup.state.getSnapshot()).toBe(before)
+  })
+
   it('gates a confirmed option until acknowledgement, then settles through the original binding', async () => {
     const onSelect = vi.fn()
     const deps = makeDeps()

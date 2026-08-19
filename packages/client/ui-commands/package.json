@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-client-ui-commands",
-  "description": "Client command surface: global directory cache, '/' source, three command UI kinds, popupSelect registry",
+  "description": "Client command surface: session directory, slash dispatch, browser actions, Host commands, and popup selection",
   "version": "0.1.0-rc.5",
   "publishConfig": {
     "access": "public"

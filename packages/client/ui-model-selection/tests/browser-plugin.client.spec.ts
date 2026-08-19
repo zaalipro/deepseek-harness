@@ -149,7 +149,10 @@ describe('ui-model-selection dual entry', () => {
   it('popup options mark the host current active with the provider group in the detail', async () => {
     const b = await bench()
     b.mint('s1')
-    const options = await b.contribution().ui.options(projection('s1'), new AbortController().signal)
+    const ui = b.contribution().ui
+    expect(ui.kind).toBe('popupSelect')
+    if (ui.kind !== 'popupSelect') throw new Error('expected popupSelect command')
+    const options = await ui.options(projection('s1'), new AbortController().signal)
     expect(options.map((o: SelectOption) => o.label)).toEqual(['DeepSeek-V4-Flash', 'DeepSeek-V4-Pro'])
     expect(options[0]).toMatchObject({ active: true, detail: 'DeepSeek' })
     expect(options[1]?.active).toBeUndefined()
@@ -176,7 +179,10 @@ describe('ui-model-selection dual entry', () => {
       reasoningEffort: 'max',
     })
     // The POPUP's next options pass reflects it without a seat-side reload.
-    const options = await b.contribution().ui.options(projection('s1'), new AbortController().signal)
+    const ui = b.contribution().ui
+    expect(ui.kind).toBe('popupSelect')
+    if (ui.kind !== 'popupSelect') throw new Error('expected popupSelect command')
+    const options = await ui.options(projection('s1'), new AbortController().signal)
     expect(options.find((o: SelectOption) => o.label === 'DeepSeek-V4-Pro')).toMatchObject({ active: true })
   })
 
@@ -184,9 +190,12 @@ describe('ui-model-selection dual entry', () => {
     const b = await bench()
     b.mint('s1')
     const seatFace = b.seat().inject!(sid('s1'))
-    const options = await b.contribution().ui.options(projection('s1'), new AbortController().signal)
+    const ui = b.contribution().ui
+    expect(ui.kind).toBe('popupSelect')
+    if (ui.kind !== 'popupSelect') throw new Error('expected popupSelect command')
+    const options = await ui.options(projection('s1'), new AbortController().signal)
     const pro = options.find((o: SelectOption) => o.label === 'DeepSeek-V4-Pro')!
-    await b.contribution().ui.onSelect(pro, projection('s1'))
+    await ui.onSelect(pro, projection('s1'))
     expect(seatFace.directory.getSnapshot().current).toEqual({
       provider: 'deepseek-official',
       model: 'deepseek-v4-pro',
@@ -301,7 +310,10 @@ describe('ui-model-selection dual entry', () => {
     b.address(sid('child'))
 
     expect(b.contribution().available(projection('child'))).toBe(false)
-    await expect(b.contribution().ui.options(
+    const ui = b.contribution().ui
+    expect(ui.kind).toBe('popupSelect')
+    if (ui.kind !== 'popupSelect') throw new Error('expected popupSelect command')
+    await expect(ui.options(
       projection('child'),
       new AbortController().signal,
     )).rejects.toThrow(/unavailable for addressed subagent/)

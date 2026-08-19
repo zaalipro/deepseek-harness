@@ -737,6 +737,18 @@ importers:
       '@deepseek-ai/dsh-web-fetch-http':
         specifier: workspace:*
         version: link:../packages/web/web-fetch-http
+      '@deepseek-ai/dsh-workflow-registry':
+        specifier: workspace:*
+        version: link:../packages/workflow/workflow-registry
+      '@deepseek-ai/dsh-workflow-run-recorder':
+        specifier: workspace:*
+        version: link:../packages/workflow/workflow-run-recorder
+      '@deepseek-ai/dsh-workflow-supervisor':
+        specifier: workspace:*
+        version: link:../packages/workflow/workflow-supervisor
+      '@deepseek-ai/dsh-workflow-user-questions':
+        specifier: workspace:*
+        version: link:../packages/workflow/workflow-user-questions
       '@deepseek-ai/dsh-workflow-worker-thread':
         specifier: workspace:*
         version: link:../packages/workflow/workflow-worker-thread
@@ -885,6 +897,12 @@ importers:
       '@deepseek-ai/dsh-typert-registry':
         specifier: workspace:^
         version: link:../../typert/registry
+      '@deepseek-ai/dsh-workflow-registry':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-registry
+      '@deepseek-ai/dsh-workflow-supervisor':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-supervisor
 
   packages/attachment/attachment:
     devDependencies:
@@ -1208,6 +1226,18 @@ importers:
       '@deepseek-ai/dsh-web-search-deepseek':
         specifier: workspace:^
         version: link:../../web/web-search-deepseek
+      '@deepseek-ai/dsh-workflow-registry':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-registry
+      '@deepseek-ai/dsh-workflow-run-recorder':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-run-recorder
+      '@deepseek-ai/dsh-workflow-supervisor':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-supervisor
+      '@deepseek-ai/dsh-workflow-user-questions':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-user-questions
       '@deepseek-ai/dsh-workflow-worker-thread':
         specifier: workspace:^
         version: link:../../workflow/workflow-worker-thread
@@ -1255,6 +1285,9 @@ importers:
       '@deepseek-ai/dsh-session':
         specifier: workspace:^
         version: link:../../core/session
+      '@deepseek-ai/dsh-workflow-supervisor':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-supervisor
 
   packages/bundle/web-app:
     dependencies:
@@ -1432,12 +1465,6 @@ importers:
       '@deepseek-ai/dsh-web-frontend':
         specifier: workspace:^
         version: link:../../../apps/web
-      '@deepseek-ai/dsh-workflow-registry':
-        specifier: workspace:^
-        version: link:../../workflow/workflow-registry
-      '@deepseek-ai/dsh-workflow-supervisor':
-        specifier: workspace:^
-        version: link:../../workflow/workflow-supervisor
       '@deepseek-ai/dsh-workspace':
         specifier: workspace:^
         version: link:../../workspace/workspace
@@ -3022,12 +3049,12 @@ importers:
       '@deepseek-ai/dsh-session':
         specifier: workspace:^
         version: link:../../core/session
-      '@deepseek-ai/dsh-tool-workflow':
-        specifier: workspace:^
-        version: link:../../workflow/tool-workflow
       '@deepseek-ai/dsh-workflow':
         specifier: workspace:^
         version: link:../../workflow/workflow
+      '@deepseek-ai/dsh-workflow-run-recorder':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-run-recorder
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
@@ -3071,9 +3098,15 @@ importers:
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
+      '@types/react-dom':
+        specifier: ~18.3.1
+        version: 18.3.7(@types/react@18.3.31)
       react:
         specifier: ^18.2.0
         version: 18.3.1
+      react-dom:
+        specifier: ^18.2.0
+        version: 18.3.1(react@18.3.1)
 
   packages/client/ui-workspace:
     dependencies:
@@ -4825,9 +4858,6 @@ importers:
       '@deepseek-ai/dsh-user-questions':
         specifier: workspace:^
         version: link:../../interaction/user-questions
-      '@deepseek-ai/dsh-workflow-supervisor':
-        specifier: workspace:^
-        version: link:../../workflow/workflow-supervisor
       '@deepseek-ai/dsh-workspace':
         specifier: workspace:^
         version: link:../../workspace/workspace
@@ -8185,6 +8215,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
       '@deepseek-ai/dsh-commands':
         specifier: workspace:^
         version: link:../../interaction/commands
@@ -8194,12 +8227,18 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: workspace:^
         version: link:../../llm/llm
+      '@deepseek-ai/dsh-scope':
+        specifier: workspace:^
+        version: link:../../core/scope
       '@deepseek-ai/dsh-skill':
         specifier: workspace:^
         version: link:../../skill/skill
       '@deepseek-ai/dsh-workflow-registry':
         specifier: workspace:^
         version: link:../workflow-registry
+      '@deepseek-ai/dsh-workflow-run-recorder':
+        specifier: workspace:^
+        version: link:../workflow-run-recorder
       '@deepseek-ai/dsh-workflow-supervisor':
         specifier: workspace:^
         version: link:../workflow-supervisor
@@ -8268,6 +8307,12 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: workspace:^
         version: link:../../core/agent
+      '@deepseek-ai/dsh-fs':
+        specifier: workspace:^
+        version: link:../../fs/fs
+      '@deepseek-ai/dsh-fs-local':
+        specifier: workspace:^
+        version: link:../../fs/fs-local
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
@@ -8292,6 +8337,9 @@ importers:
       '@deepseek-ai/dsh-workflow-registry':
         specifier: workspace:^
         version: link:../workflow-registry
+      '@deepseek-ai/dsh-workflow-run-recorder':
+        specifier: workspace:^
+        version: link:../workflow-run-recorder
       '@deepseek-ai/dsh-workflow-supervisor':
         specifier: workspace:^
         version: link:../workflow-supervisor
@@ -8334,22 +8382,30 @@ importers:
       chokidar:
         specifier: ^5.0.0
         version: 5.0.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-fs':
+        specifier: workspace:^
+        version: link:../../fs/fs
+      '@deepseek-ai/dsh-fs-local':
+        specifier: workspace:^
+        version: link:../../fs/fs-local
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
-
-  packages/workflow/workflow-supervisor:
-    dependencies:
-      '@deepseek-ai/dsh-home-paths':
+      '@deepseek-ai/dsh-session':
         specifier: workspace:^
-        version: link:../../util/home-paths
-      '@deepseek-ai/schemastery':
-        specifier: link:../../../vendor/schemastery
-        version: link:../../../vendor/schemastery
+        version: link:../../core/session
+      '@deepseek-ai/dsh-typert-protocol':
+        specifier: workspace:^
+        version: link:../../typert/protocol
+
+  packages/workflow/workflow-run-recorder:
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^
@@ -8360,18 +8416,79 @@ importers:
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
-      '@deepseek-ai/dsh-llm':
-        specifier: workspace:^
-        version: link:../../llm/llm
       '@deepseek-ai/dsh-session':
         specifier: workspace:^
         version: link:../../core/session
+      '@deepseek-ai/dsh-workflow-supervisor':
+        specifier: workspace:^
+        version: link:../workflow-supervisor
+
+  packages/workflow/workflow-supervisor:
+    dependencies:
+      '@deepseek-ai/dsh-atomic-write':
+        specifier: workspace:^
+        version: link:../../util/atomic-write
+      '@deepseek-ai/dsh-home-paths':
+        specifier: workspace:^
+        version: link:../../util/home-paths
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
+      '@deepseek-ai/dsh-brand':
+        specifier: workspace:^
+        version: link:../../util/brand
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-llm':
+        specifier: workspace:^
+        version: link:../../llm/llm
+      '@deepseek-ai/dsh-output-retention':
+        specifier: workspace:^
+        version: link:../../util/output-retention
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../core/session
+      '@deepseek-ai/dsh-typert-protocol':
+        specifier: workspace:^
+        version: link:../../typert/protocol
       '@deepseek-ai/dsh-workflow':
         specifier: workspace:^
         version: link:../workflow
       '@deepseek-ai/dsh-workflow-registry':
         specifier: workspace:^
         version: link:../workflow-registry
+
+  packages/workflow/workflow-user-questions:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-user-questions':
+        specifier: workspace:^
+        version: link:../../interaction/user-questions
+      '@deepseek-ai/dsh-workflow':
+        specifier: workspace:^
+        version: link:../workflow
+      '@deepseek-ai/dsh-workflow-supervisor':
+        specifier: workspace:^
+        version: link:../workflow-supervisor
 
   packages/workflow/workflow-worker-thread:
     dependencies:
@@ -8770,6 +8887,15 @@ importers:
       '@deepseek-ai/dsh-workflow':
         specifier: workspace:^
         version: link:../../packages/workflow/workflow
+      '@deepseek-ai/dsh-workflow-registry':
+        specifier: workspace:^
+        version: link:../../packages/workflow/workflow-registry
+      '@deepseek-ai/dsh-workflow-supervisor':
+        specifier: workspace:^
+        version: link:../../packages/workflow/workflow-supervisor
+      '@deepseek-ai/dsh-workflow-user-questions':
+        specifier: workspace:^
+        version: link:../../packages/workflow/workflow-user-questions
       '@deepseek-ai/dsh-workflow-worker-thread':
         specifier: workspace:^
         version: link:../../packages/workflow/workflow-worker-thread

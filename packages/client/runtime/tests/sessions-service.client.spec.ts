@@ -379,6 +379,26 @@ describe('slot-store scope prune hook', () => {
 })
 
 describe('catalog-addressed navigation', () => {
+  it('refreshes and opens a referenced direct child through the runtime face', async () => {
+    const b = bench()
+    b.api.onSubagentList = () => Promise.resolve(ok({
+      entries: [{
+        kind: 'child', id: sid('child'), mode: 'one-shot',
+        activity: 'inactive', hasChildren: false,
+      }] as never[],
+      parentAvailable: true,
+    }))
+
+    await expect(b.svc.resolveAndOpenSubagent(sid('root'), sid('child')))
+      .resolves.toBe(true)
+    expect(b.svc.list.getSnapshot()).toMatchObject({
+      current: sid('child'),
+      currentAddress: {
+        parentSessionId: sid('root'), childSessionId: sid('child'), mode: 'one-shot',
+      },
+    })
+  })
+
   it('uses catalog labels for a listed addressed route', async () => {
     const b = bench()
     b.api.onSubagentList = (payload) => {

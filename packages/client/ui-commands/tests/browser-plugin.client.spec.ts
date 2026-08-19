@@ -15,6 +15,7 @@ import type { CommandUiContract } from '../src/client/contract.ts'
 import type { PopupSelectInjected } from '../src/client/PopupSelectView.tsx'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { apply, CommandUiRuntime, inject } from '../src/client/index.ts'
+import { apply as applyHost } from '../src/index.ts'
 
 const sid = (k: string): SessionId => k as SessionId
 
@@ -53,6 +54,10 @@ async function bench() {
 }
 
 describe('apply', () => {
+  it('keeps the Host loader entry inert', () => {
+    applyHost()
+  })
+
   it('declares the services it binds', () => {
     expect(inject).toEqual(['inputTriggers', 'sessions', 'remote', 'remote.commands', 'locale'])
   })

@@ -123,6 +123,15 @@ Human-command registry. Plain-context definitions are global; definitions regist
 register(definition: CommandDefinition): () => void
 
 /**
+ * Register a lowest-priority command used only when no ordinary global or
+ * scoped definition owns the name. This supports dynamic aliases that must
+ * yield continuously as built-in plugins mount and unmount.
+ * @param definition - discovery metadata and direct UI handler.
+ * @returns the exact effect disposer that unregisters this fallback.
+ */
+registerFallback(definition: CommandDefinition): () => void
+
+/**
  * List the effective immutable command descriptors for one agent.
  * @param agent - exact receiving agent and scoped-layer key.
  * @returns name-sorted descriptors after scoped shadowing.
@@ -161,7 +170,7 @@ find(agent: Agent, name: string): CommandDefinition | undefined
 
 Types: [Agent](core.md)
 
-Source: [`packages/interaction/commands/src/index.ts:225`](../../packages/interaction/commands/src/index.ts)
+Source: [`packages/interaction/commands/src/index.ts:228`](../../packages/interaction/commands/src/index.ts)
 
 <a id="commands-events"></a>
 

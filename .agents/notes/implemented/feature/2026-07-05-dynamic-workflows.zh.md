@@ -14,7 +14,7 @@ harness 可以通过 `dsh-tool-subagent` 将一个任务委派给一个子 agent
 
 ### 脚本约定（兼容 Claude Code）
 
-一次工作流调用包含 JSON `meta`（`name`、`description`，以及可选的 `whenToUse`/`phases`）和一段支持顶层 `await` 并返回 JSON 值的 JavaScript `script` 正文。元数据作为数据校验，从不被执行。正文接收 `agent(prompt, options)`、`parallel(thunks)`、`pipeline(items, ...stages)`、`phase(title)`、`log(message)` 和 `args`。流水线各阶段接收 `(prev, item, index)`，阶段之间无屏障；失败的子 agent 和普通阶段错误将受影响的 item 结算为 `null` 并跳过其剩余阶段。Claude Code 的确定性限制随日志机制一并延后实现，因此兼容的脚本正文在将 meta 头移入参数后可以使用时钟和随机数。
+一次工作流调用包含 JSON `meta`（`name`、`description`，以及可选的 `whenToUse`/`phases`）和一段支持顶层 `await` 并以 JSON 值完成的 JavaScript `script` 正文。元数据作为数据校验，从不被执行。正文接收 `agent(prompt, options)`、`parallel(thunksOrJobMaps)`、`pipeline(items, ...stages)`、`phase(title)`、`log(message)`、`complete(value)`、`pause()`／`await_user()`、`budget()`、scratch 文件辅助函数和 `args`。声明式 job-map 面板会在启动任何分支前校验所有 job，并以原子方式预留所有活跃 agent 调用；由于 thunk 可能包含零个、多个或嵌套调用，thunk 面板只会接纳执行时真正到达的 `agent()` 调用。流水线各阶段接收 `(prev, item, index)`，阶段之间无屏障；失败的子 agent 和普通阶段错误将受影响的 item 结算为 `null` 并跳过其剩余阶段。编写的控制流从 `args` 与已提交 Host 结果派生：时钟、随机数、共享内存原子操作、弱引用和终结器均不可用，使通用 Host 调用 journal 到达相同调用身份。该 journal 保留子项与 scratch 读取结果、观察器与 scratch 写入效果以及已满足的人类 gate；回放会返回结果、抑制重复效果与 gate、恢复阶段状态，并拒绝分歧。
 
 与 CC 有一处刻意的严格性差异：钩子误用——未知或延迟的选项（`effort`/`isolation`/`agentType`）、格式错误的参数、超出支持子集的 schema、触发上限、seam 启动失败——会抛出带 `fatal: true` 的 `WorkflowError`，组合器会重新抛出 fatal 错误而非将 item 置为 null。如果不这样做，一个拼错的选项会悄然变成一个与子 agent 失败无法区分的 `null`——这正是本仓库禁止的「被接受后被忽略」的失败模式。另有一处新增：工具的 `args` 参数是一个 JSON 对象（裸列表被包装为一个字段），使协议格式（wire format）保持诚实。
 
@@ -38,9 +38,9 @@ harness 可以通过 `dsh-tool-subagent` 将一个任务委派给一个子 agent
 
 ### Consumer（`dsh-tool-workflow`）
 
-一个 `workflow` 工具，镜像 `dsh-tool-subagent` 的同步形态：启动、await、`try/finally` dispose、abort 桥接 `exec.signal`、非 `completed` → `isError`。渲染意图：一张以调用的 `meta.name` 参数为标题的 `generic` 卡片（展示是参数的纯函数）。工具描述即面向模型的编写规范。使用策略以工具自身的 `tool:<toolName>` 提示词段落随工具发布（显式请求才使用的引导——工具引导存在于工具插件中，从不在部署 persona 中）；harness 没有 ultracode 风格的 effort 门控。
+`workflow` 工具解析一个已保存名称、内联脚本或文件来源，再要求 `ctx.workflowSupervisor` 发布一个逻辑运行。普通调用成功后会立即返回显示句柄，并把执行、取消、恢复、保留与完成交付留给监督器；`validate_only` 是唯一会被同步收集的冒烟检查路径。渲染意图是一张 `generic` 卡片，其标题依次从 `name`、`meta.name` 与固定回退值派生，因此展示仍是参数的纯函数。工具描述即面向模型的编写规范。使用策略以工具自身的 `tool:<toolName>` 提示词段落随工具发布（显式请求才使用的引导——工具引导存在于工具插件中，从不在部署 persona 中）；harness 没有 ultracode 风格的 effort 门控。
 
-对于顶层工具执行，同一消费方还会把运行及实际成员生命周期写入调用方父 Session，形成四类 log-only `tool-workflow/*` 事件。记录路径只观察、不控制执行：第一次 append 失败会禁用本运行后续写入并留下合法前缀，不改变工具结果。[`ui-workflow-run`](../../../../packages/client/ui-workflow-run/README.md) 通过 Conversation Node 引擎重建这些事实，形成独立 keyed Chat 行；现有 generic 工具行继续拥有自己的展示。持久化、回放、展开/收起与实时导航的详细决策见 [Chat 中的持久工作流运行](2026-08-10-durable-workflow-runs-in-chat.md)。
+`dsh-workflow-run-recorder` 将一次显式归属的顶层启动投影到调用方父 Session，形成四类 log-only `tool-workflow/*` 事件。工具和命令消费方各自包装恰好一次监督器启动；嵌套、内部及无法归属的启动只出现在仪表板中。稳定的受监督运行 id 跨越引擎尝试，只有一个终态逻辑事件关闭记录；发起它的 Turn 关闭并不代表中断。记录只观察、不控制执行：第一次 append 失败会禁用本运行后续写入并留下合法前缀，不改变执行。[`ui-workflow-run`](../../../../packages/client/ui-workflow-run/README.md) 通过 Conversation Node 引擎重建这些事实，形成独立 keyed Chat 行；现有 generic 工具行继续拥有自己的展示。持久化、回放、展开／收起与子项导航的详细决策见 [Chat 中的持久工作流运行](2026-08-10-durable-workflow-runs-in-chat.md)。
 
 ### 基础：subagent seam 上的结构化输出
 
@@ -48,7 +48,7 @@ harness 可以通过 `dsh-tool-subagent` 将一个任务委派给一个子 agent
 
 输出 schema 使一次 schema 有效的已提交捕获成为子 agent 成功完成的必要条件。作用域运行时呈现捕获工具和指令，仅提交成功的最终结果（包括 SDK 调用时外层 `run_code` 的结果），在捕获变为 pending 后拒绝后续副作用，并在提交后不再进行模型步骤即停止子 agent。校验失败仍是可重试的工具错误；没有已提交捕获的正常完成以错误结算。
 
-`ObjectJsonSchema` 是 `dsh-tools` 统一且可强制执行的原始 JSON Schema 子集所提供的对象根消费方视图；不支持的关键字会明确报错，因为该协议数据会逐字成为捕获工具的 parameters。[统一 JSON 值 schema Agent Note](../architecture/2026-07-20-unified-json-value-schema-dsl.md)定义词汇与校验语义，[agent 作用域运行时设计 Agent Note](../architecture/2026-07-12-agent-scope-runtime-design.md#structured-output-commits-only-authoritative-outcomes)则定义组装、提交、守卫和终止停止算法。
+`ObjectJsonSchema` 是 `dsh-tools` 统一且可强制执行的原始 JSON Schema 子集所提供的对象根消费方视图；不支持的关键字会明确报错，因为该协议数据会逐字成为捕获工具的 parameters。数组节点接受非负有限整数 `minItems` 和 `maxItems`，且最小值不得大于最大值。[统一 JSON 值 schema Agent Note](../architecture/2026-07-20-unified-json-value-schema-dsl.md)定义词汇与校验语义，[agent 作用域运行时设计 Agent Note](../architecture/2026-07-12-agent-scope-runtime-design.md#structured-output-commits-only-authoritative-outcomes)则定义组装、提交、守卫和终止停止算法。
 
 ## 测试
 
@@ -66,7 +66,6 @@ worker 侧逻辑通过进程内 `MessageChannel` 运行，使 V8 覆盖率能够
 
 - **宿主侧的恶意值防护**（无 trap 代理拒绝、从不调用访问器的描述符遍历、realm 侧预渲染抛出值、realm 构建的 promise/array/error 克隆加结构化 fatal 识别）：否决。每项防御针对的都是信任前提所接受的作者，而线程的序列化边界已经从构造上保证跨 realm 值的处理对所有输入都有确定结果。
 - **进程内 `node:vm` 执行**：机械上最简——无 RPC、无线程——但 `start()` 会在脚本的初始同步切片期间阻塞调用方，第一个 await 之后的同步自旋无法在进程内终止（vm `timeout` 仅覆盖第一个切片），且 `dispose()` 只能在宿主循环上放弃一个未 settle 的脚本。worker 线程引擎保持相同的 vm 上下文脚本 API，同时解除宿主阻塞并使终止成为现实。
-- **后台执行作为默认**（CC 的形态）：延迟。前台同步与 `dsh-tool-subagent` 的当前形态一致，后台语义应在 bash、subagent 和工作流之间统一设计一次，而非逐工具设计。
 - **工作流层为 `agent({schema})` 做 JSON 解析**：在一个消费方重复 seam 关注点，而 seam 的能力标志仍不诚实地为 `false`。
 - **Meta 嵌入脚本中作为 `export const meta = {...}`**（CC 的确切格式）：保持脚本自包含且 CC 脚本可直接使用，但获取 meta 需要在宿主上执行模型编写的文本。即使一个空的限时 vm 上下文也无法约束脚本控制的 getter（当宿主读取结果对象时）。JSON 参数消除了扫描器、执行和宿主自旋漏洞；代价是 CC 脚本的 meta 头必须移入参数（正文保持可直接使用）。
 - **`ValueSchemaSpec` 作为 `outputSchema` 协议类型**：面向作者的形式如今具有等价词汇，但工作流提供的是来自其他 realm 的原始 JSON Schema 数据；将这类运行时数据假装成可信的作者声明，会跳过原始 schema 断言边界。
@@ -76,4 +75,4 @@ worker 侧逻辑通过进程内 `MessageChannel` 运行，使 V8 覆盖率能够
 
 ## 后果
 
-扇出计划现在存在于可重运行的脚本中，`outputSchema` 提供权威的结构化子 agent 结果。每次运行付出 worker 启动和消息端口 RPC 成本，但宿主启动保持非阻塞，取消可以终止 worker，序列化强制执行值边界。worker 线程不是安全边界。无效选项会失败而非退化为 Claude Code 的 `null`；消费方通过 run handle 保持控制权，观察者仅接收快照。顶层 Web 用户还会得到持久、可回放的工作流记录，同时不扩宽执行 seam，也不把原工具卡耦合到工作流专属 UI。
+扇出计划存在于可重运行的脚本中，`outputSchema` 提供权威的结构化子 agent 结果。每次引擎尝试付出 worker 启动和消息端口 RPC 成本，但宿主启动保持非阻塞，取消可以终止 worker，序列化强制执行值边界。worker 线程不是安全边界。无效选项会失败而非退化为 Claude Code 的 `null`；监督器通过每个 run handle 保持控制权，观察者仅接收快照。普通工具会发布后台逻辑运行，顶层 Web 用户还会得到持久、可回放的记录，同时不扩宽执行 seam，也不把原工具卡耦合到工作流专属 UI。

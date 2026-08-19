@@ -65,8 +65,12 @@ The interface covers these semantic operations:
 - Convert a resolved target to the canonical process path or `file:` URI for the same execution world, and test containment without parsing its opaque key.
 - Stat target metadata without reading file contents.
 - Read complete or streamed UTF-8 text; consumers apply their own view and retention limits.
+- Open a final path component without following a symbolic link, then validate and perform a bounded raw-byte read through the same descriptor or provider object.
 - Create or replace a UTF-8 text file.
+- Publish guarded UTF-8 text without following the final path component, keeping the required create/version guard and final-entry validation in one provider operation.
 - Edit an existing UTF-8 text file by literal replacement.
+
+The two path-shaped no-follow operations exist for consumers whose source or destination pathname is itself authoritative. They close the substitution window created by composing `lstat`, `resolve`, and target-shaped I/O. A provider that cannot supply the descriptor or publication guarantee fails with `FS_IO_ERROR`; it never emulates either operation with separate checks. The local provider implements both on POSIX and fails loud on Windows pending native handle support. The E2B proof-of-concept also fails loud. Ancestor-link containment remains the owning provider or sandbox policy's separate responsibility.
 
 The provider contract also carries the freshness hooks that policy builds on — but the observed-state store and owner derivation live in the `dsh-fs-observation-policy` plugin, not on `ctx.fs`:
 
@@ -132,6 +136,7 @@ Tests follow the package boundary, not only the user-visible tools: the service 
 The defensive-pattern classes this repo has been bitten by are pinned directly:
 
 - **Atomic-write temp-file safety.** Write/edit stage through a private random `0700` directory next to the target with an exclusive owner-only (`'wx'`, `0o600`) temp file, cleanup on failure, and a final atomic rename — mirroring the bash spill-file rules, because predictable world-readable temp paths invite symlink races and disclosure. Tests assert the permissions and that a pre-existing temp path is not clobbered; this primitive is a standing requirement of the seam.
+- **Final-component substitution.** Deterministic hooks replace a pathname with a symbolic link after a no-follow read descriptor opens and immediately before guarded write publication. The read returns the opened file, while the write rejects the substituted entry and leaves its link target unchanged.
 - **`targetKey` identity through symlinks.** Two input paths resolving to the same realpath share one observed-state entry: a `read` via path A satisfies the read-before-edit guard for an `edit` via symlink path B, and a stale write through one path is detected through the other.
 - **Concurrency / stale races.** Two concurrent write/edit operations against the same target settle deterministically — one succeeds, the other is rejected with `FS_STALE_VERSION` — and a successful edit refreshes recorded state so the same owner's next edit proceeds.
 - **HMR safety and disposal.** Disposing the backend's fiber withdraws the `ctx.fs` provider; a later provider starts with no inherited state.

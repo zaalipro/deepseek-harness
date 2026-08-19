@@ -59,8 +59,8 @@ describe('validateMeta', () => {
   })
 
   it('rejects missing or mistyped name/description/whenToUse', () => {
-    expectInvalid({ description: 'd' }, 'meta.name must be a non-empty string')
-    expectInvalid({ name: '', description: 'd' }, 'meta.name must be a non-empty string')
+    expectInvalid({ description: 'd' }, 'meta.name must be 1-64 characters')
+    expectInvalid({ name: '', description: 'd' }, 'meta.name must be 1-64 characters')
     expectInvalid({ name: 'x' }, 'meta.description must be a non-empty string')
     expectInvalid({ name: 'x', description: 42 }, 'meta.description must be a non-empty string')
     expectInvalid({ name: 'x', description: 'd', whenToUse: 3 }, 'meta.whenToUse must be a string')
@@ -80,7 +80,7 @@ describe('validateMeta', () => {
     expectInvalid(
       { description: 7, extra: true, phases: [{ title: 'Scan' }, 'bad'] },
       'meta.extra is not a recognized field',
-      'meta.name must be a non-empty string',
+      'meta.name must be 1-64 characters',
       'meta.description must be a non-empty string',
       'meta.phases[1] must be an object',
     )

@@ -1,7 +1,7 @@
 /**
  * Filesystem Service Definition for one execution world. Backends own stable target
- * identity, process paths and file URIs, containment, text reads, decoding,
- * binary rejection, and atomic mutations. Read windows and
+ * identity, process paths and file URIs, containment, text reads, bounded
+ * final-component no-follow reads, decoding, binary rejection, and atomic mutations. Read windows and
  * observed-state policy stay in consumer and policy plugins; `editText`
  * remains here so version check, literal match, and rewrite share one critical
  * section.
@@ -10,6 +10,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
+import { FsError } from './types.ts'
 import type {
   FsDirEntry,
   FsEditOutcome,
@@ -24,10 +25,10 @@ import type {
 } from './types.ts'
 
 export {
-  FsError,
   FsTargetKey,
   FsVersion,
 } from './types.ts'
+export { FsError }
 export type {
   FsEditOutcome,
   FsEditRequest,
@@ -197,6 +198,72 @@ export abstract class FileSystem extends Service {
    * @returns the full raw content, at most `maxBytes` long.
    */
   abstract readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>
+
+  /**
+   * Open a caller-supplied path without following its final symbolic-link
+   * component, require the opened object to be a regular file, and return its
+   * complete raw content through that same open object. Ancestor links follow
+   * the backend's normal path rules. Metadata validation and bounded content
+   * I/O must share one descriptor or equivalent provider-owned object; a
+   * provider that cannot guarantee this rejects with `FS_IO_ERROR` rather than
+   * emulating it with separate metadata and read operations.
+   * @param path - the path to open; relative paths resolve against `opts.cwd`.
+   * @param opts - `cwd` overrides the backend's default base for relative paths.
+   * @param signal - aborts before opening and between bounded reads.
+   * @param maxBytes - inclusive byte cap on the complete content.
+   * @returns the full raw content, at most `maxBytes` long.
+   */
+  readBytesNoFollow(
+    path: string,
+    opts: { cwd?: string },
+    signal: AbortSignal | undefined,
+    maxBytes: number,
+  ): Promise<Uint8Array> {
+    void opts
+    void signal
+    void maxBytes
+    return Promise.reject(new FsError(
+      `cannot read "${path}": this filesystem provider does not support atomic final-component no-follow reads`,
+      'FS_IO_ERROR',
+    ))
+  }
+
+  /**
+   * Atomically publish complete UTF-8 text at a caller-supplied path without
+   * following its final symbolic-link component. The provider applies the
+   * required create/version guard inside this operation at publication. A
+   * final link observed before publication is rejected; one substituted after
+   * validation may be replaced as the destination path entry, but its target
+   * is never opened or mutated. Ancestor links follow the backend's normal path
+   * rules. A provider that cannot guarantee these semantics rejects with
+   * `FS_IO_ERROR` rather than composing `lstat`, `resolve`, and `writeText`.
+   * @param path - the destination path; relative paths resolve against `opts.cwd`.
+   * @param opts - `cwd` overrides the backend's default base for relative paths.
+   * @param content - the complete UTF-8 text to publish.
+   * @param expected - required guarded create or versioned replacement intent.
+   * @param signal - aborts before atomic publication takes effect.
+   * @param sandboxPolicy - the per-call mode and workspace root enforced by a
+   *   sandboxing backend; omit to leave the backend its deployment default.
+   * @returns the publication outcome and resulting version.
+   */
+  writeTextNoFollow(
+    path: string,
+    opts: { cwd?: string },
+    content: string,
+    expected: FsWriteIntent,
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsWriteOutcome> {
+    void opts
+    void content
+    void expected
+    void signal
+    void sandboxPolicy
+    return Promise.reject(new FsError(
+      `cannot write "${path}": this filesystem provider does not support atomic final-component no-follow writes`,
+      'FS_IO_ERROR',
+    ))
+  }
 
   /**
    * List direct children of a directory in stable name order. Returns resolved

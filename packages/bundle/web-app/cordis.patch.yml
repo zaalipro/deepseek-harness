@@ -94,22 +94,7 @@
     - id: plugin-inventory
       name: '@deepseek-ai/dsh-host-plugin-inventory'
 
-    # Saved-workflow definitions (`.dsh/workflows/*.workflow.json` + user +
-    # bundled roots): discovery, meta-as-data validation, watcher, workflows/change.
-    - id: workflow-registry
-      name: '@deepseek-ai/dsh-workflow-registry'
-      config:
-        dshHome: !!js dshHomePath()
-
-    # Run supervisor over ctx.workflowEngine: session display handles,
-    # background runs, same-process journal resume, pause/resume/stop/save.
-    - id: workflow-supervisor
-      name: '@deepseek-ai/dsh-workflow-supervisor'
-      config:
-        dshHome: !!js dshHomePath()
-        runsRoot: !!js dshHomePath('workflow-runs')
-
-    # Host commands: /workflow, /workflows, /create-workflow + one per saved name.
+    # Host commands: /workflow, /create-workflow + one per saved name.
     - id: workflow-commands
       name: '@deepseek-ai/dsh-command-workflows'
 
@@ -229,7 +214,7 @@
     - id: ui-workflow-run
       name: '@deepseek-ai/dsh-client-ui-workflow-run'
 
-    # Fullscreen run dashboard over the workflowRunsBySession mirror.
+    # Fullscreen run dashboard over the bounded workflow-run controller Remote.
     - id: ui-workflows
       name: '@deepseek-ai/dsh-client-ui-workflows'
 

@@ -149,6 +149,48 @@ describe('runFixtureTurn', () => {
     })
   })
 
+  it('keeps the owned interval open through a caller-provided capability drain', async () => {
+    const harness = turnHarness()
+    harness.setFollowup((message) => {
+      harness.emit(harness.session, {
+        type: 'agent/inbox/spliced', seq: 0, time: 0, data: { inserted: [message] },
+      })
+      harness.emit(harness.session, {
+        type: 'assistant/message', seq: 1, time: 1,
+        data: {
+          turn: 1,
+          step: 1,
+          message: { content: [{ type: 'text', text: 'launch acknowledged' }] },
+          usage: { inputTokens: 2, outputTokens: 1 },
+        },
+      })
+    })
+    const drain = vi.fn(async (agent: { session: unknown }) => {
+      expect(agent.session).toBe(harness.session)
+      harness.emit(harness.session, {
+        type: 'assistant/message', seq: 2, time: 2,
+        data: {
+          turn: 2,
+          step: 1,
+          message: { content: [{ type: 'text', text: 'completion acknowledged' }] },
+          usage: { inputTokens: 3, outputTokens: 2 },
+        },
+      })
+    })
+
+    await expect(runFixtureTurn(harness.ctx, {
+      task: 'launch background work',
+      drain,
+    })).resolves.toEqual({
+      type: 'result',
+      sessionId: 'fixture-session',
+      output: 'completion acknowledged',
+      usage: { inputTokens: 5, outputTokens: 3 },
+    })
+    expect(drain).toHaveBeenCalledOnce()
+    expect(harness.flush).toHaveBeenCalledWith(harness.session)
+  })
+
   it('always removes its listener when the turn fails', async () => {
     const harness = turnHarness()
     harness.whenIdle.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('turn failed'))

@@ -23,6 +23,7 @@ export type WorkflowErrorCode =
   | 'ITEM_CAP'
   | 'AGENT_START'
   | 'AGENT_RESULT'
+  | 'JOURNAL_DIVERGENCE'
   | 'RESULT_UNSERIALIZABLE'
   | 'CANCELLED'
 
@@ -36,6 +37,8 @@ export type WorkflowErrorCode =
  * distinction is explicit at every catch site rather than implied.
  */
 export class WorkflowError extends HarnessError {
+  /** Machine-routable workflow failure code. */
+  declare readonly code: WorkflowErrorCode
   /** Whether combinators must propagate this error instead of nulling the item. */
   readonly fatal: boolean
 

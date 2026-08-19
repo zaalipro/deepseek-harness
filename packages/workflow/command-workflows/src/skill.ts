@@ -1,6 +1,6 @@
 /**
  * The bundled `create-workflow` authoring skill body: the full procedure plus
- * the JavaScript reference, shipped as a runtime skill by the command plugin.
+ * the JavaScript reference, shipped through the command plugin's bundled provider.
  * The model follows it when `/create-workflow` steers it here; humans find it
  * in the slash menu because the description names the command.
  * @module @deepseek-ai/dsh-command-workflows/skill
@@ -18,10 +18,16 @@ judgment, the script shards work and verifies.
 1. **Gather intent conversationally.** What does it do, what fans out, what is
    verified, the final artifact, and roughly how many agents the user will
    tolerate. Ask before authoring; never guess scope.
-2. **Pick name + scope.** Name is lowercase letters, digits, hyphens
-   (kebab-case, \`^[a-z0-9]+(?:-[a-z0-9]+)*$\`). Scope is project
+2. **Pick name + scope.** Name is at most 64 characters, starts with a
+   lowercase letter, and otherwise uses lowercase kebab-case
+   (\`^[a-z](?:[a-z0-9]*)(?:-[a-z0-9]+)*$\`). Do not use a control verb
+   (\`pause\`, \`resume\`, \`save\`, \`stop\`, \`workflows\`) or a Windows
+   device basename. Scope is project
    (\`.dsh/workflows/\`, default, shareable) or user (\`<dshHome>/workflows/\`,
-   all projects).
+   all projects). When a name collides with another slash command, the existing
+   command keeps \`/<name>\` and the saved workflow is advertised as
+   \`/workflow-<name>\`; the host repeats the \`workflow-\` prefix if that name
+   is also occupied. The canonical \`/workflow <name>\` form always works.
 3. **Author the JS workflow.** Shape: meta (plain data) → schemas as constants
    → one section per phase. Agent prompts must be imperative and self-contained
    — command tool use and say what a valid empty answer requires.
@@ -30,7 +36,8 @@ judgment, the script shards work and verifies.
    This does NOT cover every branch, live tools, or schema handling for every
    agent output.
 5. **Save** the smoke-checked script to the chosen path (create the directory).
-   It is now runnable as \`/<name>\` or \`/workflow <name> ...\`.
+   It is now runnable as \`/<name>\` (or the qualified alias advertised by the
+   slash menu after a collision) and as \`/workflow <name> ...\`.
 6. **Offer a REAL background run** with representative args; the user watches
    it in \`/workflows\`. If they decline, stop and say only the path-specific
    smoke check ran.
@@ -56,9 +63,9 @@ Filename must equal \`<meta.name>.workflow.json\`. Unknown meta fields fail loud
 - \`agent(prompt, opts?): Promise<any>\` — one subagent to completion. Without
   \`opts.schema\` it resolves to final text; with \`opts.schema\` (object-rooted
   JSON Schema: only type/properties/required/additionalProperties/items/enum/
-  const/oneOf) it resolves to the validated object; a failed child resolves
-  \`null\`. Other opts: \`label\`, \`phase\`, \`provider\`, \`model\`. Anything
-  else rejects loudly.
+  const/oneOf, plus minItems/maxItems on arrays) it resolves to the validated
+  object; a failed child resolves \`null\`. Other opts: \`label\`, \`phase\`,
+  \`provider\`, \`model\`. Anything else rejects loudly.
 - \`parallel(items): Promise<any[]>\` — barrier. Items are zero-arg functions OR
   job maps \`{ prompt, label?, phase?, schema?, provider?, model? }\`. Failed
   slots resolve \`null\`.
@@ -68,12 +75,13 @@ Filename must equal \`<meta.name>.workflow.json\`. Unknown meta fields fail loud
 - \`phase(title)\`, \`log(message)\`, \`args\` — progress, narration, input.
 - \`complete(value)\` — end the run successfully with a JSON value. Prefer over
   \`return\`.
-- \`await_user(kind, message)\` — park for a human answer; resume continues past
-  it. \`pause(kind, message)\` — park for a condition resume CANNOT change;
-  resume re-fires it. Kinds: user, back_off, no_progress, verification, infra.
+- \`await await_user(kind, message)\` — park for a human answer; resume continues
+  past it. \`await pause(kind, message)\` — park for a condition resume CANNOT
+  change; resume re-fires it. Both hooks are asynchronous and MUST be awaited.
+  Kinds: user, back_off, no_progress, verification, infra.
 - \`budget(): { total, spent, reserved, remaining }\` — this run's logical agent
-  budget. \`write_scratch_file(name, content)\` / \`read_scratch_file(name)\` —
-  per-run scratch (single-component names).
+  budget. \`await write_scratch_file(name, content)\` / \`await
+  read_scratch_file(name)\` — per-run scratch (single-component names).
 
 Misused hooks, unknown options, unsupported schemas, and tripped caps throw
 fatal errors that kill the script — never a silent per-item \`null\`.
@@ -100,8 +108,9 @@ fatal errors that kill the script — never a silent per-item \`null\`.
 
 - Terse prompts return empty structured objects without using tools. Command
   tool use; say what a valid empty answer requires.
-- Guard every agent output: \`r != null && r.success && r.output.x != null\`.
-  Failed \`parallel()\` slots are \`null\`.
+- Guard every agent output against the schema value itself: for example,
+  \`r != null && Array.isArray(r.findings)\`. A schema-backed \`agent()\` returns
+  that structured object directly; failed \`parallel()\` slots are \`null\`.
 - Meta is pure data — no computed meta.
 - Keep \`meta.phases\` titles in sync with \`phase()\` calls.
 - \`pause()\` in a result-derived branch re-fires forever; use \`await_user\`
@@ -121,7 +130,7 @@ const verdictSchema = { type: "object", required: ["real", "reason", "evidence"]
     evidence: { type: "string" } } };
 
 const target = args && args.target;
-if (target == null) pause("verification", "Pass args.target — the diff, branch, or path to review.");
+if (target == null) await pause("verification", "Pass args.target — the diff, branch, or path to review.");
 
 phase("Review");
 const dimensions = ["correctness bugs", "error handling gaps", "performance problems"];
@@ -132,7 +141,9 @@ const results = await parallel(dimensions.map((d) => async () => await agent(
   { label: "review:" + d, schema: findingsSchema })));
 
 const findings = [];
-for (const r of results) if (r != null && r.findings) for (const f of r.findings) findings.push(f);
+for (const r of results) {
+  if (r != null && Array.isArray(r.findings)) for (const f of r.findings) findings.push(f);
+}
 if (findings.length === 0) complete({ summary: "No findings.", confirmed: [] });
 
 phase("Verify");

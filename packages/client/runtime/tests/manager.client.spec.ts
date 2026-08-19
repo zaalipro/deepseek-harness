@@ -330,6 +330,46 @@ describe('host frame routing', () => {
 })
 
 describe('subagent catalogs', () => {
+  it('refreshes and opens only the exact healthy direct child', async () => {
+    const api = new FakeApiClient()
+    api.onSubagentList = () => Promise.resolve(ok({
+      entries: [{
+        kind: 'child', id: S2, mode: 'one-shot',
+        activity: 'inactive', hasChildren: false,
+      }] as never[],
+      parentAvailable: true,
+    }))
+    const manager = new SessionManager(api, fakeRemote())
+
+    await expect(manager.resolveAndSelectSubagent(S1, S2)).resolves.toBe(true)
+    expect(manager.getListSnapshot()).toMatchObject({
+      current: S2,
+      currentAddress: {
+        parentSessionId: S1, childSessionId: S2, mode: 'one-shot',
+      },
+    })
+
+    api.onSubagentList = () => Promise.resolve(ok({ entries: [], parentAvailable: true }))
+    await expect(manager.resolveAndSelectSubagent('other-parent' as SessionId, S2))
+      .resolves.toBe(false)
+    expect(manager.getListSnapshot().current).toBe(S2)
+
+    api.onSubagentList = () => Promise.resolve(err({
+      code: 'internal', message: 'catalog unavailable', details: {},
+    }))
+    await expect(manager.resolveAndSelectSubagent('failed-parent' as SessionId, S2))
+      .resolves.toBe(false)
+
+    api.onSubagentList = () => Promise.resolve(ok({
+      entries: [{
+        kind: 'child', id: S2, mode: 'continuable', label: 'worker',
+        activity: 'inactive', hasChildren: false,
+      }] as never[],
+      parentAvailable: true,
+    }))
+    await expect(manager.resolveAndSelectSubagent(S1, S2)).resolves.toBe(false)
+  })
+
   it('keeps a catalog-discovered child address across ordinary selection and status frames', async () => {
     const api = new FakeApiClient()
     api.onList = () => Promise.resolve(ok({ items: [

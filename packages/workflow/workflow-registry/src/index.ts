@@ -17,34 +17,44 @@
  * @module @deepseek-ai/dsh-workflow-registry
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
-import { statSync } from 'node:fs'
-import { unwatchFile, watchFile } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { join, posix, resolve, win32 } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { validateMeta } from '@deepseek-ai/dsh-workflow'
+import { FsError } from '@deepseek-ai/dsh-fs'
+import type { FileSystem, FsDirEntry } from '@deepseek-ai/dsh-fs'
+import type { Session } from '@deepseek-ai/dsh-session'
+import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { isWorkflowName, validateMeta } from '@deepseek-ai/dsh-workflow'
 import chokidar from 'chokidar'
-import { WORKFLOW_SCOPE_PRECEDENCE, isWorkflowName } from './types.ts'
+// Typert-generated ./typert and ./remote artifacts import Zod at runtime.
+import type {} from 'zod'
+import { WORKFLOW_SCOPE_PRECEDENCE } from './types.ts'
 import type {
   WorkflowCatalogSnapshot,
   WorkflowDefinition,
+  WorkflowDefinitionEnvelope,
   WorkflowDefinitionSummary,
+  WorkflowDefinitionSummaryView,
   WorkflowLookupOptions,
+  WorkflowSaveOptions,
   WorkflowScope,
 } from './types.ts'
 
 export type {
   WorkflowCatalogSnapshot,
   WorkflowDefinition,
+  WorkflowDefinitionEnvelope,
   WorkflowDefinitionSummary,
+  WorkflowDefinitionSummaryView,
   WorkflowLookupOptions,
+  WorkflowSaveOptions,
+  WorkflowSaveScope,
   WorkflowScope,
 } from './types.ts'
-export { WORKFLOW_SCOPE_PRECEDENCE, isWorkflowName } from './types.ts'
+export { isWorkflowDisplayName, isWorkflowName } from '@deepseek-ai/dsh-workflow'
+export { WORKFLOW_SCOPE_PRECEDENCE } from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -72,6 +82,16 @@ export interface Config {
   bundledDir?: string
   /** Whether chokidar watches the roots and invalidates the catalog (default true). */
   watch?: boolean
+  /** Maximum complete UTF-8 bytes in one definition envelope (default 1048576). */
+  maxDefinitionBytes?: number
+  /** Maximum matching definition files accepted from one root (default 256). */
+  maxDefinitionsPerRoot?: number
+  /** Maximum distinct project roots retained in the watcher set (default 128). */
+  watchMaxProjects?: number
+  /** Milliseconds a changed definition must remain stable before invalidation (default 200). */
+  watchStabilityThresholdMs?: number
+  /** Chokidar stability probe interval in milliseconds (default 100). */
+  watchPollIntervalMs?: number
 }
 
 export const Config: Schema<Config> = z.object({
@@ -79,12 +99,31 @@ export const Config: Schema<Config> = z.object({
   dshHome: z.string(),
   bundledDir: z.string(),
   watch: z.boolean().default(true),
+  maxDefinitionBytes: z.natural().min(1).default(1024 * 1024),
+  maxDefinitionsPerRoot: z.natural().min(1).default(256),
+  watchMaxProjects: z.natural().min(1).default(128),
+  watchStabilityThresholdMs: z.natural().min(1).default(200),
+  watchPollIntervalMs: z.natural().min(1).default(100),
 })
 
 /** One discovered root and its precedence scope. */
 interface WorkflowRoot {
   readonly path: string
+  /** Canonical containment owner for ancestor-link escape checks. */
+  readonly basePath: string
   readonly scope: WorkflowScope
+}
+
+interface RootWatchState {
+  readonly watcher: ReturnType<typeof chokidar.watch>
+  readonly close: () => Promise<void>
+}
+
+/** Select path operations from the execution-world spelling, not the Host OS. */
+function executionPath(path: string): typeof posix {
+  return path.includes('\\')
+    ? win32
+    : posix
 }
 
 /** Render any thrown value for a discovery failure without trusting coercion. */
@@ -96,22 +135,17 @@ function renderThrown(error: unknown): string {
   }
 }
 
-/** Whether `path` exists as a directory. */
-async function isDirectory(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isDirectory()
-  } catch {
-    return false
-  }
-}
-
 /** Walk upward from `cwd` to the nearest ancestor containing `.git`; fall back to `cwd`. */
-async function findProjectRoot(cwd: string): Promise<string> {
-  let current = resolve(cwd)
+async function findProjectRoot(cwd: string, fileSystem: FileSystem, signal?: AbortSignal): Promise<string> {
+  const pathApi = executionPath(cwd)
+  const initial = pathApi.resolve(cwd)
+  let current = initial
   while (true) {
-    if (await isDirectory(join(current, '.git'))) return current
-    const parent = dirname(current)
-    if (parent === current) return resolve(cwd)
+    signal?.throwIfAborted()
+    const marker = await fileSystem.lstat(pathApi.join(current, '.git'), {}, signal)
+    if (marker?.type === 'directory' || marker?.type === 'file') return current
+    const parent = pathApi.dirname(current)
+    if (parent === current) return initial
     current = parent
   }
 }
@@ -145,9 +179,6 @@ export function parseDefinitionFile(raw: string, path: string, expectedName: str
   if (meta.name !== expectedName) {
     throw new Error(`${path}: filename "${expectedName}.workflow.json" must match meta.name "${meta.name}"`)
   }
-  if (!isWorkflowName(meta.name)) {
-    throw new Error(`${path}: meta.name "${meta.name}" is not a kebab-case workflow name`)
-  }
   return {
     name: meta.name,
     description: meta.description,
@@ -159,21 +190,76 @@ export function parseDefinitionFile(raw: string, path: string, expectedName: str
 }
 
 /** Read one definition file and fill its scope from the owning root. */
-async function readDefinition(filePath: string, scope: WorkflowScope): Promise<WorkflowDefinition> {
-  const raw = await readFile(filePath, 'utf8')
-  const name = filePath.slice(filePath.lastIndexOf('/') + 1, -'.workflow.json'.length)
+async function readDefinition(
+  fileSystem: FileSystem,
+  rootPath: string,
+  entry: FsDirEntry,
+  scope: WorkflowScope,
+  maxDefinitionBytes: number,
+  signal?: AbortSignal,
+): Promise<WorkflowDefinition> {
+  const filePath = executionPath(rootPath).join(rootPath, entry.name)
+  let bytes: Uint8Array
+  try {
+    bytes = await fileSystem.readBytesNoFollow(filePath, {}, signal, maxDefinitionBytes)
+  } catch (error: unknown) {
+    if (error instanceof FsError) {
+      switch (error.code) {
+        case 'FS_NOT_REGULAR_FILE':
+          throw new Error(
+            `${filePath}: workflow definition must be a regular file; symbolic-link definitions are not allowed`,
+            { cause: error },
+          )
+        case 'FS_TOO_LARGE':
+          throw new Error(`${filePath}: definition exceeds the ${maxDefinitionBytes}-byte limit`, { cause: error })
+        default:
+          throw error
+      }
+    }
+    throw error
+  }
+  let raw: string
+  try {
+    raw = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch (error) {
+    throw new Error(`${filePath}: definition is not valid UTF-8`, { cause: error })
+  }
+  const name = entry.name.slice(0, -'.workflow.json'.length)
   const definition = parseDefinitionFile(raw, filePath, name)
   return { ...definition, scope }
 }
 
 /** Discover every `.workflow.json` file under one root; a missing root contributes nothing. */
-async function discoverRoot(root: WorkflowRoot): Promise<WorkflowDefinition[]> {
-  if (!(await isDirectory(root.path))) return []
-  const entries = await readdir(root.path)
-  const files = entries.filter(entry => entry.endsWith('.workflow.json')).sort()
+async function discoverRoot(
+  fileSystem: FileSystem,
+  root: WorkflowRoot,
+  maxDefinitions: number,
+  maxDefinitionBytes: number,
+  signal?: AbortSignal,
+): Promise<WorkflowDefinition[]> {
+  signal?.throwIfAborted()
+  const resolveOptions = signal === undefined ? {} : { signal }
+  const [baseTarget, rootTarget] = await Promise.all([
+    fileSystem.resolve(root.basePath, resolveOptions),
+    fileSystem.resolve(root.path, resolveOptions),
+  ])
+  if (!fileSystem.contains(baseTarget, rootTarget)) {
+    throw new Error(`${root.path}: workflow root escapes its ${root.scope} scope through a symbolic-link ancestor`)
+  }
+  const pathInfo = await fileSystem.lstat(root.path, {}, signal)
+  if (pathInfo === undefined) return []
+  if (pathInfo.type === 'symlink') throw new Error(`${root.path}: symbolic-link workflow roots are not allowed`)
+  if (pathInfo.type !== 'directory') throw new Error(`${root.path}: workflow root must be a directory`)
+  const entries = (await fileSystem.listDir(rootTarget, signal))
+    .filter(entry => entry.name.endsWith('.workflow.json'))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  if (entries.length > maxDefinitions) {
+    throw new Error(`${root.path}: found ${entries.length} workflow definitions; maximum is ${maxDefinitions}`)
+  }
   const definitions: WorkflowDefinition[] = []
-  for (const file of files) {
-    definitions.push(await readDefinition(join(root.path, file), root.scope))
+  for (const entry of entries) {
+    signal?.throwIfAborted()
+    definitions.push(await readDefinition(fileSystem, root.path, entry, root.scope, maxDefinitionBytes, signal))
   }
   return definitions
 }
@@ -198,7 +284,7 @@ function summarize(definition: WorkflowDefinition): WorkflowDefinitionSummary {
     ...definition.whenToUse !== undefined ? { whenToUse: definition.whenToUse } : {},
     ...definition.phases !== undefined ? { phases: definition.phases } : {},
     scope: definition.scope,
-    ...definition.path !== undefined ? { path: definition.path } : {},
+    path: definition.path,
   }
 }
 
@@ -208,8 +294,8 @@ function summarize(definition: WorkflowDefinition): WorkflowDefinitionSummary {
  * watcher only fires `workflows/change` as a faster refresh hint. A malformed
  * definition file fails discovery loud with its path and reason.
  */
-export class WorkflowRegistry extends Service {
-  static inject = []
+export class WorkflowRegistry extends TypertRemoteService {
+  static inject = ['fs']
 
   static Config = Config
 
@@ -217,33 +303,63 @@ export class WorkflowRegistry extends Service {
   private readonly dshHome: string
   private readonly bundledDir: string | undefined
   private readonly watch: boolean
+  private readonly maxDefinitionBytes: number
+  private readonly maxDefinitionsPerRoot: number
+  private readonly watchMaxProjects: number
+  private readonly watchStabilityThresholdMs: number
+  private readonly watchPollIntervalMs: number
+  private readonly watchedRoots = new Map<string, RootWatchState>()
+  private readonly watchedProjects = new Map<string, Set<string>>()
+  private invalidationQueued = false
 
   constructor(ctx: Context, config: Config) {
-    super(ctx, 'workflows')
-    this.enabled = config.enabled ?? true
+    super(ctx, 'workflows', { namespace: 'workflowDefinitions' })
+    this.enabled = config.enabled !== false
     this.dshHome = resolveDshHome(config.dshHome)
     this.bundledDir = config.bundledDir === undefined ? undefined : resolve(config.bundledDir)
-    this.watch = config.watch ?? true
-    if (this.enabled && this.watch) {
-      void this.startWatcher()
-    }
+    this.watch = config.watch !== false
+    this.maxDefinitionBytes = config.maxDefinitionBytes ?? 1024 * 1024
+    this.maxDefinitionsPerRoot = config.maxDefinitionsPerRoot ?? 256
+    this.watchMaxProjects = config.watchMaxProjects ?? 128
+    this.watchStabilityThresholdMs = config.watchStabilityThresholdMs ?? 200
+    this.watchPollIntervalMs = config.watchPollIntervalMs ?? 100
+    ctx.effect(() => async () => {
+      const watchers = [...this.watchedRoots.values()]
+      this.watchedRoots.clear()
+      this.watchedProjects.clear()
+      await Promise.all(watchers.map(watcher => watcher.close()))
+    }, 'workflow-registry: watchers')
   }
 
   /** Resolve the roots for one workspace (project + user + bundled), in precedence order. */
-  private async roots(cwd: string | undefined): Promise<WorkflowRoot[]> {
-    const projectRoot = await findProjectRoot(cwd ?? process.cwd())
+  private async roots(cwd: string | undefined, signal?: AbortSignal): Promise<{ roots: WorkflowRoot[]; projectRoot: string }> {
+    const projectRoot = await findProjectRoot(cwd === undefined ? process.cwd() : cwd, this.ctx.fs, signal)
     const roots: WorkflowRoot[] = []
-    if (this.bundledDir !== undefined) roots.push({ path: resolve(this.bundledDir), scope: 'bundled' })
-    roots.push({ path: join(projectRoot, '.dsh', 'workflows'), scope: 'project' })
-    roots.push({ path: join(this.dshHome, 'workflows'), scope: 'user' })
-    return roots
+    if (this.bundledDir !== undefined) {
+      const bundledPath = resolve(this.bundledDir)
+      roots.push({ path: bundledPath, basePath: bundledPath, scope: 'bundled' })
+    }
+    roots.push({
+      path: executionPath(projectRoot).join(projectRoot, '.dsh', 'workflows'),
+      basePath: projectRoot,
+      scope: 'project',
+    })
+    roots.push({ path: join(this.dshHome, 'workflows'), basePath: this.dshHome, scope: 'user' })
+    return { roots, projectRoot }
   }
 
   /** Discover all roots for one workspace; discovery always re-reads the roots so a watcher miss cannot pin a stale catalog. */
-  private async discover(cwd: string | undefined): Promise<readonly WorkflowDefinition[]> {
+  private async discover(cwd: string | undefined, signal?: AbortSignal): Promise<readonly WorkflowDefinition[]> {
     if (!this.enabled) return []
-    const roots = await this.roots(cwd)
-    const results = await Promise.all(roots.map(discoverRoot))
+    const { roots, projectRoot } = await this.roots(cwd, signal)
+    const results = await Promise.all(roots.map(root => discoverRoot(
+      this.ctx.fs,
+      root,
+      this.maxDefinitionsPerRoot,
+      this.maxDefinitionBytes,
+      signal,
+    )))
+    if (this.watch) this.observeRoots(projectRoot, roots)
     const merged = merge(results.flat())
     return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name))
   }
@@ -255,9 +371,31 @@ export class WorkflowRegistry extends Service {
    */
   async list(options: WorkflowLookupOptions = {}): Promise<WorkflowDefinitionSummary[]> {
     options.signal?.throwIfAborted()
-    const definitions = await this.discover(options.cwd)
+    const definitions = await this.discover(options.cwd, options.signal)
     options.signal?.throwIfAborted()
     return definitions.map(summarize)
+  }
+
+  /**
+   * List browser-safe summaries for the exact session workspace selected by
+   * the Remote Session lookup. The caller cannot supply or override a cwd.
+   * @param session - resolved Session whose recorded cwd selects discovery.
+   * @param signal - cancellation for a superseded Client read.
+   * @returns sorted winning summaries without filesystem paths or scripts.
+   * @throws when the resolved session has no recorded cwd.
+   */
+  @Remote('list')
+  async listForClient(session: Session, signal: AbortSignal): Promise<readonly WorkflowDefinitionSummaryView[]> {
+    signal.throwIfAborted()
+    const cwd = session.header.cwd
+    if (cwd === undefined) throw new Error('workflow definition listing requires a session cwd')
+    const definitions = await this.list({ cwd, signal })
+    return definitions.map(definition => ({
+      name: definition.name,
+      description: definition.description,
+      ...definition.whenToUse === undefined ? {} : { whenToUse: definition.whenToUse },
+      scope: definition.scope,
+    }))
   }
 
   /**
@@ -278,73 +416,147 @@ export class WorkflowRegistry extends Service {
   async get(name: string, options: WorkflowLookupOptions = {}): Promise<WorkflowDefinition | undefined> {
     if (!isWorkflowName(name)) return undefined
     options.signal?.throwIfAborted()
-    const definitions = await this.discover(options.cwd)
+    const definitions = await this.discover(options.cwd, options.signal)
     options.signal?.throwIfAborted()
     return definitions.find(definition => definition.name === name)
   }
 
   /**
-   * Start a watcher per root: an existing root is watched directly; a missing
-   * root is polled with `fs.watchFile` (no broad recursion, so a deep ancestor
-   * never spans unrelated siblings) and attached once it appears.
+   * Atomically create or replace one project/user definition through the
+   * filesystem capability. Final-component links are refused during initial
+   * validation and guarded provider publication; the required create/version
+   * intent stays inside the path-shaped publication operation.
+   * @param envelope - metadata plus JavaScript body to persist.
+   * @param options - destination scope, workspace selector, and cancellation.
+   * @returns the filesystem provider's display path for the committed file.
    */
-  private async startWatcher(): Promise<void> {
-    const roots = await this.roots(process.cwd())
-    const stops = roots.map(root => this.watchRoot(root.path))
-    this.ctx.effect(() => () => { for (const stop of stops) stop() }, 'workflow-registry: watcher')
+  async save(envelope: WorkflowDefinitionEnvelope, options: WorkflowSaveOptions): Promise<string> {
+    options.signal?.throwIfAborted()
+    const meta = validateMeta(envelope.meta)
+    if (typeof envelope.script !== 'string') throw new TypeError('workflow definition script must be a string')
+    const encodedBytes = new TextEncoder().encode(envelope.script).byteLength
+    if (encodedBytes > this.maxDefinitionBytes) {
+      throw new Error(`workflow script exceeds the ${this.maxDefinitionBytes}-byte limit`)
+    }
+    const cwd = options.cwd === undefined ? process.cwd() : options.cwd
+    const projectRoot = await findProjectRoot(cwd, this.ctx.fs, options.signal)
+    const rootPath = options.scope === 'project'
+      ? executionPath(projectRoot).join(projectRoot, '.dsh', 'workflows')
+      : join(this.dshHome, 'workflows')
+    const rootInfo = await this.ctx.fs.lstat(rootPath, {}, options.signal)
+    if (rootInfo?.type === 'symlink') throw new Error(`${rootPath}: symbolic-link workflow roots are not allowed`)
+    if (rootInfo !== undefined && rootInfo.type !== 'directory') throw new Error(`${rootPath}: workflow root must be a directory`)
+
+    const filePath = executionPath(rootPath).join(rootPath, `${meta.name}.workflow.json`)
+    const pathInfo = await this.ctx.fs.lstat(filePath, {}, options.signal)
+    if (pathInfo?.type === 'symlink') throw new Error(`${filePath}: refusing to replace a symbolic link`)
+    if (pathInfo !== undefined && pathInfo.type !== 'file') throw new Error(`${filePath}: workflow definition must be a regular file`)
+    const resolveOptions = options.signal === undefined ? {} : { signal: options.signal }
+    const [baseTarget, rootTarget] = await Promise.all([
+      this.ctx.fs.resolve(options.scope === 'project' ? projectRoot : this.dshHome, resolveOptions),
+      this.ctx.fs.resolve(rootPath, resolveOptions),
+    ])
+    if (!this.ctx.fs.contains(baseTarget, rootTarget)) {
+      throw new Error(`${rootPath}: workflow root escapes its ${options.scope} scope through a symbolic-link ancestor`)
+    }
+    const content = `${JSON.stringify({ meta, script: envelope.script }, null, 2)}\n`
+    if (new TextEncoder().encode(content).byteLength > this.maxDefinitionBytes) {
+      throw new Error(`workflow definition exceeds the ${this.maxDefinitionBytes}-byte limit`)
+    }
+    const expected = pathInfo === undefined
+      ? { kind: 'createIfAbsent' as const }
+      : { kind: 'replaceIfVersion' as const, version: pathInfo.version }
+    await this.ctx.fs.writeTextNoFollow(filePath, {}, content, expected, options.signal, {
+      mode: options.scope === 'project' ? 'workspace-write' : 'danger-full-access',
+      workspaceRoot: options.scope === 'project' ? projectRoot : this.dshHome,
+    })
+    this.emitChange()
+    return filePath
   }
 
-  /** Watch one root path, re-attaching chokidar when a missing root appears. */
-  private watchRoot(path: string): () => void {
-    let watcher: ReturnType<typeof chokidar.watch> | undefined
-    let stopPoll: (() => void) | undefined
-    let closed = false
+  /** Retain shared roots and a bounded LRU of project-specific roots. */
+  private observeRoots(projectRoot: string, roots: readonly WorkflowRoot[]): void {
+    const paths = new Set(roots.map(root => root.path))
+    this.watchedProjects.delete(projectRoot)
+    this.watchedProjects.set(projectRoot, paths)
+    for (const path of paths) this.ensureWatcher(path)
+    while (this.watchedProjects.size > this.watchMaxProjects) {
+      const oldest = this.watchedProjects.entries().next()
+      /* v8 ignore next -- loop condition proves an entry exists. */
+      if (oldest.done) break
+      const [evictedProject, evictedPaths] = oldest.value
+      this.watchedProjects.delete(evictedProject)
+      for (const path of evictedPaths) {
+        if ([...this.watchedProjects.values()].some(retained => retained.has(path))) continue
+        const watcher = this.watchedRoots.get(path)
+        this.watchedRoots.delete(path)
+        void watcher?.close().catch((error: unknown) => {
+          this.ctx.logger.warn(`workflow-registry: watcher close failed: ${renderThrown(error)}`)
+        })
+      }
+    }
+  }
 
-    const invalidate = (): void => { this.emitChange() }
-    const detach = (): void => {
-      stopPoll?.()
-      stopPoll = undefined
-      void watcher?.close()
-      watcher = undefined
+  /** Open one narrow watcher. Chokidar follows a missing path from its nearest existing ancestor. */
+  private ensureWatcher(path: string): void {
+    if (this.watchedRoots.has(path)) return
+    let closed = false
+    const watcher = chokidar.watch(path, {
+      persistent: true,
+      ignoreInitial: true,
+      depth: 0,
+      followSymlinks: false,
+      atomic: true,
+      awaitWriteFinish: {
+        stabilityThreshold: this.watchStabilityThresholdMs,
+        pollInterval: this.watchPollIntervalMs,
+      },
+    })
+    const state: RootWatchState = {
+      watcher,
+      close: async () => {
+        if (closed) return
+        closed = true
+        await watcher.close()
+      },
     }
-    const attach = (): void => {
-      if (closed) return
-      if (statSync(path, { throwIfNoEntry: false })?.isDirectory() === true) {
-        // Leaf exists: watch it directly (a narrow directory, depth 0).
-        watcher = chokidar.watch(path, {
-          ignoreInitial: true,
-          depth: 0,
-          awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
-        })
-        watcher.on('add', invalidate)
-        watcher.on('unlink', invalidate)
-        watcher.on('change', invalidate)
-        watcher.on('unlinkDir', () => {
-          invalidate()
-          detach()
-          // The root vanished; fall back to polling for its return.
-          armPoll()
-        })
-        return
-      }
-      armPoll()
+    this.watchedRoots.set(path, state)
+    const definitionChanged = (changedPath: string): void => {
+      if (!closed && changedPath.endsWith('.workflow.json')) this.queueChange()
     }
-    const armPoll = (): void => {
-      if (closed || stopPoll !== undefined) return
-      const onPoll = (): void => {
-        invalidate()
-        // The root appeared (or its mtime moved): attach a real watcher.
-        detach()
-        attach()
-      }
-      watchFile(path, { persistent: false, interval: 250 }, onPoll)
-      stopPoll = () => { unwatchFile(path, onPoll) }
-    }
-    attach()
-    return () => {
-      closed = true
-      detach()
-    }
+    watcher.on('add', definitionChanged)
+    watcher.on('change', definitionChanged)
+    watcher.on('unlink', definitionChanged)
+    watcher.on('addDir', () => { this.reopenWatcher(path, state) })
+    watcher.on('unlinkDir', () => { this.reopenWatcher(path, state) })
+    watcher.on('error', (error) => {
+      if (!closed) this.ctx.logger.warn(`workflow-registry: failed to watch ${path}: ${renderThrown(error)}`)
+    })
+    // Discovery completed before the watcher attached. One refetch after its
+    // baseline is ready closes that missed-change window.
+    watcher.once('ready', () => { if (!closed) this.queueChange() })
+  }
+
+  /** Reattach after the watched root itself appears or disappears. */
+  private reopenWatcher(path: string, state: RootWatchState): void {
+    if (this.watchedRoots.get(path) !== state) return
+    this.watchedRoots.delete(path)
+    void state.close().then(() => {
+      if ([...this.watchedProjects.values()].some(paths => paths.has(path))) this.ensureWatcher(path)
+      this.queueChange()
+    }).catch((error: unknown) => {
+      this.ctx.logger.warn(`workflow-registry: watcher refresh failed for ${path}: ${renderThrown(error)}`)
+    })
+  }
+
+  /** Coalesce a synchronous filesystem event burst into one catalog change. */
+  private queueChange(): void {
+    if (this.invalidationQueued) return
+    this.invalidationQueued = true
+    queueMicrotask(() => {
+      this.invalidationQueued = false
+      this.emitChange()
+    })
   }
 
   /** Dispatch the change event while containing each listener failure. */

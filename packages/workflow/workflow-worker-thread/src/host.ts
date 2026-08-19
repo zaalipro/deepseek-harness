@@ -6,7 +6,10 @@
  * @module @deepseek-ai/dsh-workflow-worker-thread/host
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { Buffer } from 'node:buffer'
+import { randomBytes } from 'node:crypto'
+import { constants } from 'node:fs'
+import { chmod, link, lstat, mkdir, open, readdir, rename, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
@@ -14,16 +17,21 @@ import type { WorkerOptions } from 'node:worker_threads'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { assertNever } from '@deepseek-ai/dsh-llm'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentRun } from '@deepseek-ai/dsh-subagent'
+import { WorkflowError } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowMeta, WorkflowResult, WorkflowRun, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import { renderThrown } from './realm.ts'
 import type { ExecutionObserver } from './runtime.ts'
-import { HostToWorkerType, WorkerToHostType } from './protocol.ts'
+import {
+  decodeWorkerToHostMessage,
+  HostToWorkerType,
+  WorkerToHostType,
+  WorkflowProtocolError,
+} from './protocol.ts'
 import type { HostToWorkerPayloads, WorkerToHostMessage } from './protocol.ts'
-import type { ChildResult, ChildStartRequest, WorkerInit } from './types.ts'
+import type { ChildResult, ChildStartRequest, WorkerHostLimits, WorkerInit } from './types.ts'
 
 /** Single-component scratch file name grammar (mirrors the worker-side validation). */
 const SCRATCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -31,21 +39,33 @@ const SCRATCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 /** One published child and its shared quiescent-disposal transaction. */
 interface ChildRecord {
   readonly run: SubagentRun
+  resultState: 'pending' | 'settled' | 'failed'
   disposal?: Promise<void>
 }
 
+/** Identity and accounted size of one retained scratch file. */
+interface ScratchFileState {
+  readonly device: number
+  readonly inode: number
+  size: number
+}
+
+/** Host accounting for the run's private scratch directory. */
+interface ScratchState {
+  readonly dir: string
+  readonly device: number
+  readonly inode: number
+  readonly files: Map<string, ScratchFileState>
+  totalBytes: number
+}
+
 /**
- * The scrubbed worker environment: no ambient credentials, no loader flags.
- * Windows derives `os.tmpdir()` from `TMP`/`TEMP` and falls back to the
- * literal relative path `undefined\temp` when the environment is empty, so
- * tsx's transform cache would land in a cwd-relative `undefined/temp`
- * directory; the host's real temp path (not a credential) is injected there.
- * The unbuilt shape additionally forwards `TSX_TSCONFIG_PATH` for path
- * resolution.
- * @param platform - host platform; overridable so tests exercise both peer arms.
- * @param tsconfigPath - the tsconfig pin to forward; only the unbuilt caller
- *   passes one, so the built worker never observes the host's pin.
- * @returns the scrubbed worker environment object.
+ * Build the credential-free environment inherited by a workflow worker.
+ * Windows receives only its absolute temp directory; source workers may also
+ * receive the tsx paths-map pin used by the source launcher.
+ * @param platform - host platform, overridable for tests.
+ * @param tsconfigPath - optional source-launcher tsconfig pin.
+ * @returns the environment passed to the Worker constructor.
  */
 export function workerSpawnEnv(
   platform: NodeJS.Platform = process.platform,
@@ -61,20 +81,15 @@ export function workerSpawnEnv(
   return env
 }
 
-/**
- * Resolve a built worker bundle or an unbuilt bootstrap that installs both tsx
- * transforms inside the worker. Both shapes clear `execArgv` and the ambient
- * environment (the worker only sees the platform temp path and, unbuilt,
- * `TSX_TSCONFIG_PATH`).
- * @param init - the run payload, passed as `workerData`.
- * @returns the entry path or URL and the Worker options to spawn it with.
- */
+/** Resolve the built worker or source-mode tsx bootstrap for one isolated run. */
 function resolveWorkerSpawn(init: WorkerInit): { entry: string | URL; options: WorkerOptions } {
-  /* v8 ignore next 3 -- the built-output arm: tests always run unbuilt (src/); the built-worker e2e exercises this shape for real */
+  /* v8 ignore next 3 -- built-output arm is exercised by the built-worker e2e */
   if (!import.meta.url.endsWith('.ts')) {
-    return { entry: fileURLToPath(new URL('./worker.cjs', import.meta.url)), options: { workerData: init, env: workerSpawnEnv(), execArgv: [] } }
+    return {
+      entry: fileURLToPath(new URL('./worker.cjs', import.meta.url)),
+      options: { workerData: init, env: workerSpawnEnv(), execArgv: [] },
+    }
   }
-  // Resolve tsx only for unbuilt consumers and install it before importing TS.
   const workerEntry = new URL('./worker.ts', import.meta.url)
   const tsxEsmApiEntry = import.meta.resolve('tsx/esm/api')
   const tsxCjsApiEntry = import.meta.resolve('tsx/cjs/api')
@@ -118,14 +133,56 @@ export class WorkerRun implements WorkflowRun {
   private readonly worker: Worker
   /** Set on `exit`: the thread is gone, so posting has nowhere to go. */
   private workerGone = false
+  /** The startup handshake is single-use; effect frames are forbidden before it. */
+  private workerReady = false
   /** Accepted `child-start` messages — the terminate-path `agentsStarted` (see module doc). */
   private hostStarted = 0
   /** Published children by callId; an entry leaves only after disposal settles. */
   private readonly children = new Map<number, ChildRecord>()
   /** Provider starts that have not yet fulfilled or rejected. */
   private readonly pendingStarts = new Set<Promise<void>>()
+  /** Accepted child calls still starting or published; the host concurrency authority. */
+  private readonly activeChildCallIds = new Set<number>()
+  /** Every worker-minted RPC id is single-use across child starts and scratch calls. */
+  private readonly claimedCallIds = new Set<number>()
+  /** Call ids whose first frame was a child start (dispose must reference one). */
+  private readonly childCallIds = new Set<number>()
+  /** Child call ids whose single disposal request was already accepted. */
+  private readonly disposedChildCallIds = new Set<number>()
+  /** Child calls whose published handle completed host-side disposal. */
+  private readonly reapedChildCallIds = new Set<number>()
+  /** Child ids already projected into one observer agent-start event. */
+  private readonly announcedChildren = new Set<string>()
+  /** Host-published child record paired to each announced member sequence. */
+  private readonly agentChildren = new Map<number, ChildRecord>()
+  /** Member sequences are single-use even after their paired end. */
+  private readonly announcedAgentSeqs = new Set<number>()
+  /** Member sequences that already committed their one journal result. */
+  private readonly committedAgentSeqs = new Set<number>()
+  /** Stable host-call identities retained across attempts or committed here. */
+  private readonly committedJournalCallIds = new Set<string>()
+  /** Last committed host-call ordinal, including replay entries supplied at start. */
+  private lastJournalOrdinal = 0
+  /** Exact UTF-8 JSON-array bytes retained across this logical run's journal. */
+  private journalBytes: number
+  /** Entries represented by {@link journalBytes}; determines the next comma byte. */
+  private journalEntries: number
   /** Started-but-not-ended agents by seq — the pairing ledger the HOST guarantees (see {@link endAgent}). */
   private readonly liveAgents = new Map<number, WorkflowAgentInfo>()
+  /** Scratch operations admitted before cancellation/settlement and not yet quiescent. */
+  private readonly pendingScratch = new Set<Promise<void>>()
+  /** Scratch RPCs admitted over this attempt, including reads and overwrites. */
+  private scratchOperations = 0
+  /** Serialize scratch reads/writes so quota accounting and publication are one transaction. */
+  private scratchTail: Promise<void> = Promise.resolve()
+  /** Lazily verifies the existing scratch directory and computes resume accounting. */
+  private scratchState: Promise<ScratchState | undefined> | undefined
+  /** Scratch I/O has its own cancellation: normal script settlement drains it instead of aborting it. */
+  private readonly scratchController = new AbortController()
+  /** First scratch failure, retained while a worker Result waits for admitted effects. */
+  private scratchFailure: string | undefined
+  /** A worker Result won and is waiting for admitted scratch effects. */
+  private drainingWorkerResult = false
   private readonly quiescenceWaiters: (() => void)[] = []
   /** The per-run abort fanout every child start request carries. */
   private readonly controller = new AbortController()
@@ -140,20 +197,34 @@ export class WorkerRun implements WorkflowRun {
     readonly id: WorkflowRunId,
     readonly meta: WorkflowMeta,
     private readonly parent: Agent,
-    init: WorkerInit,
+    private readonly init: WorkerInit,
     private readonly provider: string,
     private readonly disposeGraceMs: number,
     private readonly observer: ExecutionObserver,
     signal: AbortSignal | undefined,
     private readonly scratchDir: string | undefined,
+    private readonly hostLimits: WorkerHostLimits,
   ) {
     this.result = new Promise<WorkflowResult>((resolve) => { this.settleResolve = resolve })
+    const initialJournal = JSON.stringify(init.journal ?? [])
+    this.journalBytes = Buffer.byteLength(initialJournal, 'utf8')
+    this.journalEntries = init.journal?.length ?? 0
+    for (const entry of init.journal ?? []) {
+      this.committedJournalCallIds.add(entry.callId)
+      this.lastJournalOrdinal = entry.ordinal
+    }
+    if (this.journalBytes > hostLimits.maxJournalBytes) {
+      throw new WorkflowError(
+        `workflow journal exceeds the ${hostLimits.maxJournalBytes}-byte limit before this attempt starts`,
+        'INVALID_ARGUMENT',
+      )
+    }
     // workerData rides the structured clone: args are plain JSON by the seam
     // contract, so the clone is total and doubles as the caller-isolation
     // copy (a clone failure throws loud out of start()).
     const { entry, options } = resolveWorkerSpawn(init)
     this.worker = new Worker(entry, options)
-    this.worker.on('message', (message: WorkerToHostMessage) => { this.onMessage(message) })
+    this.worker.on('message', (message: unknown) => { this.onRawMessage(message) })
     this.worker.on('error', (error) => { this.onWorkerDeath(`workflow worker failed: ${renderThrown(error)}`, false) })
     /* v8 ignore next -- messageerror: not constructible from the engine's own protocol (every payload is JSON data) */
     this.worker.on('messageerror', (error) => { this.onWorkerDeath(`workflow worker message failed to deserialize: ${renderThrown(error)}`, false) })
@@ -190,10 +261,11 @@ export class WorkerRun implements WorkflowRun {
     // ordinary consumer path (await result, then dispose -> cancel) would arm
     // a grace timer nothing ever clears, pinning the run and its Worker
     // closure until the grace expires - a bounded leak per completed run.
-    if (this.settled || this.terminalClaimed || this.cancelReason !== undefined) return
+    if (this.settled || (this.terminalClaimed && !this.drainingWorkerResult) || this.cancelReason !== undefined) return
     this.cancelReason = reason ?? 'workflow cancelled'
     this.post(HostToWorkerType.Cancel, { reason: this.cancelReason })
     this.abortChildren(this.cancelReason)
+    if (!this.scratchController.signal.aborted) this.scratchController.abort(this.cancelReason)
     this.graceTimer = setTimeout(() => {
       // Cancellation already owns the race through cancelReason; close the
       // terminal boundary explicitly before observer teardown callbacks.
@@ -202,7 +274,7 @@ export class WorkerRun implements WorkflowRun {
       // every stranded start before the run settles, so ends precede
       // workflow/end.
       this.endStrandedAgents()
-      this.settleResult(this.cancelledResult(this.hostStarted))
+      this.settleResult(this.cancelledResult(this.observedAgentSpend()))
       void this.worker.terminate()
     }, this.disposeGraceMs)
     // unref'd: an armed grace timer must never hold the process open.
@@ -252,7 +324,7 @@ export class WorkerRun implements WorkflowRun {
       await Promise.race([
         (async () => {
           await this.result
-          await this.childQuiescence()
+          await this.runQuiescence()
         })(),
         sleep(this.disposeGraceMs),
       ])
@@ -280,14 +352,30 @@ export class WorkerRun implements WorkflowRun {
     }
   }
 
+  /** Decode one untrusted worker frame and contain protocol failures to this run. */
+  private onRawMessage(raw: unknown): void {
+    if (this.workerDeathObserved || this.terminalClaimed) return
+    try {
+      this.onMessage(decodeWorkerToHostMessage(raw, this.hostLimits.maxProtocolMessageBytes))
+    } catch (error: unknown) {
+      const detail = error instanceof WorkflowProtocolError ? error.message : renderThrown(error)
+      this.onWorkerDeath(`workflow worker protocol violation: ${detail}`, false)
+      void this.worker.terminate()
+    }
+  }
+
   private onMessage(message: WorkerToHostMessage): void {
     // Node may emit `error`, then deliver an already-queued `message`, then
     // emit `exit`. The first death signal is the host's logical delivery
     // barrier: nothing arriving afterward may create a child, narrate after
     // workflow/end, or compete with the chosen outcome.
-    if (this.workerDeathObserved) return
+    if (!this.workerReady && message.type !== WorkerToHostType.Ready) {
+      throw new WorkflowProtocolError(`${message.type} arrived before ready`)
+    }
     switch (message.type) {
       case WorkerToHostType.Ready:
+        if (this.workerReady) throw new WorkflowProtocolError('ready arrived more than once')
+        this.workerReady = true
         this.post(HostToWorkerType.Go, {})
         break
       case WorkerToHostType.Phase:
@@ -296,27 +384,29 @@ export class WorkerRun implements WorkflowRun {
         // already in flight (or emitted while the cancel crossed the
         // boundary) must not reach observers — nothing is emitted after
         // cancel() returns.
-        if (this.cancelReason === undefined) this.observer.phase(message.title)
+        this.assertEventText(message.title, 'phase title')
+        if (this.cancelReason === undefined && !this.terminalClaimed) this.observer.phase(message.title)
         break
       case WorkerToHostType.Log:
-        if (this.cancelReason === undefined) this.observer.log(message.message)
+        this.assertEventText(message.message, 'log message')
+        if (this.cancelReason === undefined && !this.terminalClaimed) this.observer.log(message.message)
         break
       case WorkerToHostType.AgentStart:
-        this.liveAgents.set(message.info.seq, message.info)
-        this.observer.agentStart(message.info)
+        this.onAgentStart(message.info)
         break
       case WorkerToHostType.AgentEnd:
         // NOT suppressed on cancel: cancelled children report their paired
         // agent-end with outcome 'cancelled'. The gate (with the termination
         // paths' synthesis) is what makes the one-pair-per-started-child
         // contract hold on every stop path.
-        this.endAgent(message.info)
+        this.onAgentEnd(message.info)
         break
       case WorkerToHostType.Gate:
-        if (this.cancelReason === undefined) this.observer.gate(message.gate)
+        this.assertEventText(message.gate.message, 'gate message')
+        if (this.cancelReason === undefined && !this.terminalClaimed) this.observer.gate(message.gate)
         break
-      case WorkerToHostType.AgentResult:
-        this.observer.agentResult(message.seq, message.result)
+      case WorkerToHostType.JournalCommit:
+        this.onJournalCommit(message.entry)
         break
       case WorkerToHostType.ScratchWrite:
         void this.onScratchWrite(message.callId, message.name, message.content)
@@ -333,9 +423,6 @@ export class WorkerRun implements WorkflowRun {
       case WorkerToHostType.Result:
         this.onResult(message.result)
         break
-      /* v8 ignore next 2 -- closed engine-owned union; the arm only makes adding a message type a compile error */
-      default:
-        assertNever(message, 'worker-to-host message')
     }
   }
 
@@ -353,7 +440,136 @@ export class WorkerRun implements WorkflowRun {
     return undefined
   }
 
+  /** Reserve a worker RPC id exactly once across every side-effecting family. */
+  private claimCallId(callId: number, operation: string): void {
+    if (this.claimedCallIds.has(callId)) {
+      throw new WorkflowProtocolError(`${operation} reused callId ${callId}`)
+    }
+    this.claimedCallIds.add(callId)
+  }
+
+  /** Bound observer text before retaining or dispatching worker-controlled content. */
+  private assertEventText(value: string, label: string): void {
+    if (Buffer.byteLength(value, 'utf8') > this.hostLimits.maxEventTextBytes) {
+      throw new WorkflowProtocolError(`${label} exceeds the ${this.hostLimits.maxEventTextBytes}-byte limit`)
+    }
+  }
+
+  /** Admit one lifecycle start only for a child the host actually published. */
+  private onAgentStart(info: WorkflowAgentInfo): void {
+    if (this.cancelReason !== undefined || this.terminalClaimed) return
+    this.assertEventText(info.label, 'agent label')
+    if (info.phase !== undefined) this.assertEventText(info.phase, 'agent phase')
+    const priorSequence = this.init.initialAgentSeq ?? 0
+    if (info.seq <= priorSequence) {
+      throw new WorkflowProtocolError(`agent-start seq ${info.seq} does not advance prior seq ${priorSequence}`)
+    }
+    if (info.seq > priorSequence + this.hostStarted) {
+      throw new WorkflowProtocolError(`agent-start seq ${info.seq} exceeds the host-observed sequence range`)
+    }
+    if (this.announcedAgentSeqs.has(info.seq)) {
+      throw new WorkflowProtocolError(`agent-start reused seq ${info.seq}`)
+    }
+    if (this.announcedChildren.has(info.childId)) {
+      throw new WorkflowProtocolError(`agent-start reused child id ${JSON.stringify(info.childId)}`)
+    }
+    const published = [...this.children.values()].find(record => record.run.id === info.childId)
+    if (!published) {
+      throw new WorkflowProtocolError(`agent-start references unpublished child ${JSON.stringify(info.childId)}`)
+    }
+    this.announcedChildren.add(info.childId)
+    this.announcedAgentSeqs.add(info.seq)
+    this.agentChildren.set(info.seq, published)
+    this.liveAgents.set(info.seq, info)
+    this.observer.agentStart(info)
+  }
+
+  /** Require one end to match the exact start snapshot before forwarding it. */
+  private onAgentEnd(info: WorkflowAgentEndInfo): void {
+    const start = this.liveAgents.get(info.seq)
+    if (start === undefined) {
+      if (this.cancelReason !== undefined || this.terminalClaimed) return
+      throw new WorkflowProtocolError(`agent-end references unknown seq ${info.seq}`)
+    }
+    if (start.label !== info.label || start.phase !== info.phase || start.childId !== info.childId) {
+      throw new WorkflowProtocolError(`agent-end metadata does not match agent-start seq ${info.seq}`)
+    }
+    // Result and cancel use the same port but the child's promise callback can
+    // already have posted its completed end when the host accepts cancel.
+    // Cancellation owns that race and the journal frame is suppressed, so
+    // normalize the still-live pair instead of misclassifying it as corrupt.
+    if (this.cancelReason !== undefined) {
+      this.endAgent({ ...start, outcome: 'cancelled' })
+      return
+    }
+    const child = this.agentChildren.get(info.seq)
+    if (child === undefined) {
+      throw new WorkflowProtocolError(`agent-end seq ${info.seq} lost its host child correlation`)
+    }
+    const committed = this.committedAgentSeqs.has(info.seq)
+    if (info.outcome === 'cancelled') {
+      throw new WorkflowProtocolError(`agent-end seq ${info.seq} reported cancellation before the run was cancelled`)
+    }
+    if (info.outcome === 'completed' && (!committed || child.resultState !== 'settled')) {
+      throw new WorkflowProtocolError(`agent-end seq ${info.seq} settled without a committed result`)
+    }
+    if (info.outcome === 'failed'
+      && !((committed && child.resultState === 'settled') || (!committed && child.resultState === 'failed'))) {
+      throw new WorkflowProtocolError(`agent-end seq ${info.seq} does not match the host-observed child result`)
+    }
+    this.endAgent(info)
+  }
+
+  /** Commit one completed host call in monotonic order and at most once. */
+  private onJournalCommit(entry: Parameters<ExecutionObserver['journalCommit']>[0]): void {
+    if (this.cancelReason !== undefined || this.terminalClaimed) return
+    if (entry.ordinal !== this.lastJournalOrdinal + 1) {
+      throw new WorkflowProtocolError(`journal-commit ordinal ${entry.ordinal} does not follow ${this.lastJournalOrdinal}`)
+    }
+    if (this.committedJournalCallIds.has(entry.callId)) {
+      throw new WorkflowProtocolError(`journal-commit reused call identity ${JSON.stringify(entry.callId)}`)
+    }
+    if (entry.kind === 'agent') {
+      if (!this.liveAgents.has(entry.seq)) {
+        throw new WorkflowProtocolError(`agent journal commit references unknown live seq ${entry.seq}`)
+      }
+      if (this.agentChildren.get(entry.seq)?.resultState !== 'settled') {
+        throw new WorkflowProtocolError(`agent journal commit seq ${entry.seq} arrived before a host-observed child result`)
+      }
+      if (this.committedAgentSeqs.has(entry.seq)) {
+        throw new WorkflowProtocolError(`agent journal commit reused seq ${entry.seq}`)
+      }
+    }
+    this.assertEventText(entry.callId, 'journal call identity')
+    const encodedEntry = JSON.stringify(entry)
+    const entryBytes = Buffer.byteLength(encodedEntry, 'utf8')
+    const addedBytes = entryBytes + (this.journalEntries === 0 ? 0 : 1)
+    if (addedBytes > this.hostLimits.maxJournalBytes - this.journalBytes) {
+      throw new WorkflowProtocolError(
+        `journal-commit exceeds the ${this.hostLimits.maxJournalBytes}-byte journal limit`,
+      )
+    }
+    if (entry.kind === 'agent') this.committedAgentSeqs.add(entry.seq)
+    this.committedJournalCallIds.add(entry.callId)
+    this.lastJournalOrdinal = entry.ordinal
+    this.journalBytes += addedBytes
+    this.journalEntries += 1
+    this.observer.journalCommit(entry)
+  }
+
   private onChildStart(callId: number, request: ChildStartRequest): void {
+    this.claimCallId(callId, 'child-start')
+    this.childCallIds.add(callId)
+    if (Buffer.byteLength(request.prompt, 'utf8') > this.hostLimits.maxChildPromptBytes) {
+      throw new WorkflowProtocolError(`child-start prompt exceeds the ${this.hostLimits.maxChildPromptBytes}-byte limit`)
+    }
+    const alreadySpent = this.init.initialAgentSpend ?? 0
+    if (alreadySpent + this.hostStarted >= this.init.limits.maxTotalAgents) {
+      throw new WorkflowProtocolError('child-start exceeds the host-enforced total agent cap')
+    }
+    if (this.activeChildCallIds.size >= this.init.limits.maxConcurrentAgents) {
+      throw new WorkflowProtocolError('child-start exceeds the host-enforced concurrent agent cap')
+    }
     const initialFailure = this.childAdmissionFailure()
     if (initialFailure !== undefined) {
       // Refuse after a terminal boundary: a child must never start on an
@@ -363,12 +579,13 @@ export class WorkerRun implements WorkflowRun {
       return
     }
     this.hostStarted += 1
+    this.activeChildCallIds.add(callId)
     const task = this.startChild(callId, request)
     this.pendingStarts.add(task)
     void task.then(
-      () => { this.finishPendingStart(task) },
+      () => { this.finishPendingStart(task, callId) },
       /* v8 ignore next -- startChild contains provider and cleanup failures */
-      () => { this.finishPendingStart(task) },
+      () => { this.finishPendingStart(task, callId) },
     )
   }
 
@@ -409,7 +626,7 @@ export class WorkerRun implements WorkflowRun {
       return
     }
 
-    const record: ChildRecord = { run }
+    const record: ChildRecord = { run, resultState: 'pending' }
     this.children.set(callId, record)
     // Attach result forwarding before publishing the child handle. Because the
     // callback itself runs in a later microtask, ChildStarted is still posted
@@ -423,13 +640,16 @@ export class WorkerRun implements WorkflowRun {
             stopReason: result.stopReason,
           })
           if (snapshot === undefined) throw new TypeError('child result is not losslessly JSON-serializable')
+          record.resultState = 'settled'
           return () => { this.post(HostToWorkerType.ChildSettled, { callId, result: snapshot }) }
         } catch (error: unknown) {
+          record.resultState = 'failed'
           const rendered = `workflow child result could not cross the worker boundary: ${renderThrown(error)}`
           return () => { this.post(HostToWorkerType.ChildFailed, { callId, rendered }) }
         }
       },
       (error: unknown) => {
+        record.resultState = 'failed'
         const rendered = renderThrown(error)
         return () => { this.post(HostToWorkerType.ChildFailed, { callId, rendered }) }
       },
@@ -439,10 +659,20 @@ export class WorkerRun implements WorkflowRun {
   }
 
   private onChildDispose(callId: number): void {
+    if (!this.childCallIds.has(callId)) {
+      throw new WorkflowProtocolError(`child-dispose references unknown callId ${callId}`)
+    }
+    if (this.disposedChildCallIds.has(callId)) {
+      throw new WorkflowProtocolError(`child-dispose repeated callId ${callId}`)
+    }
+    this.disposedChildCallIds.add(callId)
     const record = this.children.get(callId)
     if (record === undefined) {
-      // Already disposed host-side (a dispose() drive or a death reap beat
-      // the RPC) — the ack is still owed (the worker-side wrapper awaits it).
+      if (!this.reapedChildCallIds.has(callId)) {
+        throw new WorkflowProtocolError(`child-dispose references child ${callId} before host-side disposal`)
+      }
+      // A dispose() drive or death reap beat the RPC, so the worker-side
+      // wrapper is still owed its acknowledgement.
       this.post(HostToWorkerType.ChildDisposed, { callId })
       return
     }
@@ -476,24 +706,29 @@ export class WorkerRun implements WorkflowRun {
   /** Drop a child record and release quiescence waiters when all work ends. */
   private finishChild(callId: number): void {
     this.children.delete(callId)
-    this.notifyChildQuiescence()
+    this.reapedChildCallIds.add(callId)
+    this.activeChildCallIds.delete(callId)
+    this.notifyRunQuiescence()
   }
 
   /** Retire one provider startup transaction. */
-  private finishPendingStart(task: Promise<void>): void {
+  private finishPendingStart(task: Promise<void>, callId: number): void {
     this.pendingStarts.delete(task)
-    this.notifyChildQuiescence()
+    if (!this.children.has(callId)) this.activeChildCallIds.delete(callId)
+    this.notifyRunQuiescence()
   }
 
-  /** Release waiters only after both pending starts and published children end. */
-  private notifyChildQuiescence(): void {
-    if (this.children.size !== 0 || this.pendingStarts.size !== 0) return
+  /** Release waiters only after provider, child, and scratch work ends. */
+  private notifyRunQuiescence(): void {
+    if (this.children.size !== 0 || this.pendingStarts.size !== 0 || this.pendingScratch.size !== 0) return
     for (const waiter of this.quiescenceWaiters.splice(0)) waiter()
   }
 
-  /** Resolves once every pending start and published child has reached quiescence. */
-  private childQuiescence(): Promise<void> {
-    if (this.children.size === 0 && this.pendingStarts.size === 0) return Promise.resolve()
+  /** Resolves once every pending start, child, and admitted scratch operation is quiescent. */
+  private runQuiescence(): Promise<void> {
+    if (this.children.size === 0 && this.pendingStarts.size === 0 && this.pendingScratch.size === 0) {
+      return Promise.resolve()
+    }
     return new Promise((resolve) => { this.quiescenceWaiters.push(resolve) })
   }
 
@@ -511,70 +746,400 @@ export class WorkerRun implements WorkflowRun {
   }
 
   private onResult(result: WorkflowResult): void {
-    // The owned worker session sends one Result. Keep a late duplicate or a
-    // Result queued behind another terminal source completely side-effect-free.
-    if (this.terminalClaimed) return
+    // onRawMessage excludes a late duplicate or a Result queued behind another
+    // terminal source before dispatch reaches this method.
     // First-wins is decided when the Result message reaches the host. If no
     // external cancellation was already in flight, this result won. Reaping a
     // stray child below may synchronously reenter cancel() through provider
     // callbacks, but that internal post-result cleanup must not retroactively
     // rewrite the worker result that arrived first.
     const cancellationWasRequested = this.cancelReason !== undefined
+    const observedSpend = this.observedAgentSpend()
+    if (result.agentsStarted < observedSpend) {
+      throw new WorkflowProtocolError(
+        `result agentsStarted ${result.agentsStarted} is below the host-observed spend ${observedSpend}`,
+      )
+    }
+    if (result.agentsStarted > this.init.limits.maxTotalAgents) {
+      throw new WorkflowProtocolError(
+        `result agentsStarted ${result.agentsStarted} exceeds the ${this.init.limits.maxTotalAgents}-agent cap`,
+      )
+    }
     // Claim before settlement cleanup invokes provider disposal. Once Result
     // won, a later cancellation cannot rewrite it.
     this.terminalClaimed = true
     // Abort pending starts and begin disposing published children before the
-    // workflow becomes externally settled. Cleanup remains independently
-    // tracked by childQuiescence and the holder's dispose().
+    // workflow becomes externally settled. Scratch operations already
+    // admitted are effects: drain them before publishing the outcome.
     this.reapChildren('workflow settled')
-    if (!cancellationWasRequested) {
-      this.settleResult(result)
+    this.endStrandedAgents()
+    this.drainingWorkerResult = true
+    void this.settleAfterScratch(result, cancellationWasRequested)
+  }
+
+  /** Drain admitted scratch effects before publishing the worker-selected outcome. */
+  private async settleAfterScratch(result: WorkflowResult, cancellationWasRequested: boolean): Promise<void> {
+    await this.scratchQuiescence()
+    /* v8 ignore next -- scratch quiescence resolves before any competing settle can pass the terminal claim */
+    if (this.settled) return
+    if (cancellationWasRequested || this.cancelReason !== undefined) {
+      this.settleResult(result.stopReason === 'cancelled'
+        ? result
+        : this.cancelledResult(result.agentsStarted))
       return
     }
-    if (result.stopReason !== 'cancelled') {
-      // The script settled while our cancel was crossing the thread boundary
-      // — the seam-visible result had NOT settled when cancellation was
-      // requested, so report cancelled (the vm drive()'s post-settle check,
-      // relocated to the receiving side of the race).
-      this.settleResult(this.cancelledResult(result.agentsStarted))
+    /* v8 ignore start -- deterministic tests cannot order Result ahead of
+     * scratch-failure termination; onScratchFailure covers I/O failure. */
+    if (this.scratchFailure !== undefined) {
+      this.settleResult({
+        value: null,
+        stopReason: 'error',
+        error: this.scratchFailure,
+        agentsStarted: result.agentsStarted,
+      })
       return
     }
+    /* v8 ignore stop */
     this.settleResult(result)
   }
 
-  /** Serve one scratch write; a missing scratch directory reads as a contained failure. */
-  private async onScratchWrite(callId: number, name: string, content: string): Promise<void> {
-    if (this.scratchDir === undefined || !SCRATCH_NAME.test(name)) {
+  /** Serve one quota-checked, atomic scratch write. */
+  private onScratchWrite(callId: number, name: string, content: string): Promise<void> {
+    this.claimScratchCall(callId, name, 'scratch-write')
+    return this.trackScratch(async () => {
+      this.scratchController.signal.throwIfAborted()
+      const state = await this.getScratchState()
+      if (state === undefined) {
+        this.post(HostToWorkerType.ScratchWritten, { callId })
+        return
+      }
+      await this.writeScratch(state, name, content)
       this.post(HostToWorkerType.ScratchWritten, { callId })
-      return
-    }
-    try {
-      await mkdir(join(this.scratchDir, 'scratch'), { recursive: true })
-      await writeFile(join(this.scratchDir, 'scratch', name), content, 'utf8')
-    } catch (error: unknown) {
-      this.ctx.logger.warn(`workflow scratch write failed: ${renderThrown(error)}`)
-    } finally {
-      this.post(HostToWorkerType.ScratchWritten, { callId })
-    }
+    })
   }
 
-  /** Serve one scratch read; absent files resolve with no content. */
-  private async onScratchRead(callId: number, name: string): Promise<void> {
-    if (this.scratchDir === undefined || !SCRATCH_NAME.test(name)) {
-      this.post(HostToWorkerType.ScratchReadResult, { callId })
-      return
-    }
-    try {
-      const content = await readFile(join(this.scratchDir, 'scratch', name), 'utf8')
-      this.post(HostToWorkerType.ScratchReadResult, { callId, content })
-    } catch (error: unknown) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code === 'ENOENT') {
+  /** Serve one no-follow, bounded scratch read. */
+  private onScratchRead(callId: number, name: string): Promise<void> {
+    this.claimScratchCall(callId, name, 'scratch-read')
+    return this.trackScratch(async () => {
+      this.scratchController.signal.throwIfAborted()
+      const state = await this.getScratchState()
+      if (state === undefined) {
         this.post(HostToWorkerType.ScratchReadResult, { callId })
         return
       }
-      this.ctx.logger.warn(`workflow scratch read failed: ${renderThrown(error)}`)
-      this.post(HostToWorkerType.ScratchReadResult, { callId })
+      const content = await this.readScratch(state, name)
+      this.post(HostToWorkerType.ScratchReadResult, {
+        callId,
+        ...(content === undefined ? {} : { content }),
+      })
+    })
+  }
+
+  /** Validate one scratch RPC before queueing any filesystem work. */
+  private claimScratchCall(callId: number, name: string, operation: string): void {
+    if (!SCRATCH_NAME.test(name)) {
+      throw new WorkflowProtocolError(`${operation} name must be one safe path component`)
+    }
+    if (this.cancelReason !== undefined || this.workerDeathObserved || this.terminalClaimed) {
+      throw new WorkflowProtocolError(`${operation} arrived after the run stopped admitting effects`)
+    }
+    if (this.scratchOperations >= this.hostLimits.scratch.maxOperations) {
+      throw new WorkflowProtocolError(
+        `${operation} exceeds the ${this.hostLimits.scratch.maxOperations}-operation scratch limit`,
+      )
+    }
+    if (this.pendingScratch.size >= this.hostLimits.scratch.maxPendingOperations) {
+      throw new WorkflowProtocolError(
+        `${operation} exceeds the ${this.hostLimits.scratch.maxPendingOperations}-operation pending scratch limit`,
+      )
+    }
+    this.claimCallId(callId, operation)
+    this.scratchOperations += 1
+  }
+
+  /** Serialize, retain, and contain one admitted scratch operation. */
+  private trackScratch(operation: () => Promise<void>): Promise<void> {
+    const execution = this.scratchTail.then(operation)
+    this.scratchTail = execution.catch(() => { /* the tracked operation reports the failure */ })
+    const tracked = execution.then(
+      () => {},
+      (error: unknown) => { this.onScratchFailure(error) },
+    )
+    this.pendingScratch.add(tracked)
+    void tracked.then(() => {
+      this.pendingScratch.delete(tracked)
+      this.notifyRunQuiescence()
+    })
+    return tracked
+  }
+
+  /** Resolve once every scratch operation admitted before the terminal frame is quiescent. */
+  private scratchQuiescence(): Promise<void> {
+    if (this.pendingScratch.size === 0) return Promise.resolve()
+    return Promise.all([...this.pendingScratch]).then(() => {})
+  }
+
+  /** Turn a scratch quota, integrity, or I/O failure into a run-local terminal error. */
+  private onScratchFailure(error: unknown): void {
+    // Cancellation aborts admitted file operations intentionally. Their
+    // rejection only retires quiescence; the cancellation outcome already
+    // owns settlement and must not be rewritten as a scratch/worker error.
+    if (this.cancelReason !== undefined) return
+    if (this.scratchFailure !== undefined) return
+    this.scratchFailure = `workflow scratch operation failed: ${renderThrown(error)}`
+    if (!this.scratchController.signal.aborted) this.scratchController.abort(this.scratchFailure)
+    this.onWorkerDeath(this.scratchFailure, false)
+    void this.worker.terminate()
+  }
+
+  /** Initialize scratch storage at first use, never merely because a run started. */
+  private getScratchState(): Promise<ScratchState | undefined> {
+    const existing = this.scratchState
+    if (existing !== undefined) return existing
+    const created = this.initializeScratch()
+    this.scratchState = created
+    return created
+  }
+
+  /** Verify/create the owner-private scratch directory and account retained files on resume. */
+  private async initializeScratch(): Promise<ScratchState | undefined> {
+    if (this.scratchDir === undefined) return undefined
+    const dir = join(this.scratchDir, 'scratch')
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    const directory = await lstat(dir)
+    if (!directory.isDirectory() || directory.isSymbolicLink()) {
+      throw new Error('scratch path is not a real directory')
+    }
+    await chmod(dir, 0o700)
+    const files = new Map<string, ScratchFileState>()
+    let totalBytes = 0
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (!SCRATCH_NAME.test(entry.name) || !entry.isFile() || entry.isSymbolicLink()) {
+        throw new Error(`scratch directory contains an unsupported entry ${JSON.stringify(entry.name)}`)
+      }
+      const file = await this.scratchFileState(join(dir, entry.name))
+      if (file.size > this.hostLimits.scratch.maxFileBytes) {
+        throw new Error(`scratch file ${JSON.stringify(entry.name)} exceeds the per-file quota`)
+      }
+      files.set(entry.name, file)
+      totalBytes += file.size
+    }
+    if (files.size > this.hostLimits.scratch.maxFiles) {
+      throw new Error(`scratch directory exceeds the ${this.hostLimits.scratch.maxFiles}-file quota`)
+    }
+    if (totalBytes > this.hostLimits.scratch.maxTotalBytes) {
+      throw new Error(`scratch directory exceeds the ${this.hostLimits.scratch.maxTotalBytes}-byte quota`)
+    }
+    return { dir, device: directory.dev, inode: directory.ino, files, totalBytes }
+  }
+
+  /** Inspect one singly linked scratch path without following a final symlink. */
+  private async scratchFileState(path: string): Promise<ScratchFileState> {
+    const before = await lstat(path)
+    if (!before.isFile() || before.isSymbolicLink()) {
+      throw new Error(`scratch path ${JSON.stringify(path)} is not a regular file`)
+    }
+    if (before.nlink !== 1) {
+      throw new Error(`scratch path ${JSON.stringify(path)} has multiple hard links`)
+    }
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      const info = await handle.stat()
+      /* v8 ignore next -- a non-file descriptor requires a path replacement between lstat() and open(). */
+      if (!info.isFile()) throw new Error(`scratch path ${JSON.stringify(path)} is not a regular file`)
+      /* v8 ignore next -- inode mismatch requires a path replacement between lstat() and open(). */
+      if (info.dev !== before.dev || info.ino !== before.ino) {
+        /* v8 ignore next */
+        throw new Error(`scratch path ${JSON.stringify(path)} changed while opening`)
+      }
+      /* v8 ignore next -- link-count change requires an external hard-link race after lstat(). */
+      if (info.nlink !== 1) {
+        /* v8 ignore next */
+        throw new Error(`scratch path ${JSON.stringify(path)} gained a hard link while opening`)
+      }
+      /* v8 ignore next -- Node fs.Stat.size is always a non-negative safe integer for an opened local file. */
+      if (!Number.isSafeInteger(info.size) || info.size < 0) throw new Error('scratch file size is invalid')
+      await handle.chmod(0o600)
+      return { device: info.dev, inode: info.ino, size: info.size }
+    } finally {
+      await handle.close()
+    }
+  }
+
+  /** Atomically publish one owner-only scratch file after quota admission. */
+  private async writeScratch(state: ScratchState, name: string, content: string): Promise<void> {
+    this.scratchController.signal.throwIfAborted()
+    await this.assertScratchDirectory(state)
+    const bytes = Buffer.from(content, 'utf8')
+    const limits = this.hostLimits.scratch
+    if (bytes.length > limits.maxFileBytes) {
+      throw new Error(`scratch file ${JSON.stringify(name)} exceeds the ${limits.maxFileBytes}-byte per-file quota`)
+    }
+    const previous = state.files.get(name)
+    if (previous === undefined && state.files.size >= limits.maxFiles) {
+      throw new Error(`scratch write exceeds the ${limits.maxFiles}-file quota`)
+    }
+    const nextTotal = state.totalBytes - (previous?.size ?? 0) + bytes.length
+    if (nextTotal > limits.maxTotalBytes) {
+      throw new Error(`scratch write exceeds the ${limits.maxTotalBytes}-byte total quota`)
+    }
+    const target = join(state.dir, name)
+    const temporary = join(state.dir, `.${randomBytes(12).toString('hex')}.tmp`)
+    const backup = join(state.dir, `.${randomBytes(12).toString('hex')}.bak`)
+    let handle: Awaited<ReturnType<typeof open>> | undefined
+    let staged: ScratchFileState | undefined
+    let previousMoved = false
+    let published = false
+    try {
+      handle = await open(temporary, 'wx', 0o600)
+      await handle.chmod(0o600)
+      await handle.writeFile(bytes, { signal: this.scratchController.signal })
+      await handle.sync()
+      const stagedInfo = await handle.stat()
+      /* v8 ignore next -- the owner-held wx descriptor cannot change file type; link-count mutation needs an external race. */
+      if (!stagedInfo.isFile() || stagedInfo.nlink !== 1) {
+        /* v8 ignore next */
+        throw new Error('scratch temporary path changed while writing')
+      }
+      staged = { device: stagedInfo.dev, inode: stagedInfo.ino, size: bytes.length }
+      await handle.close()
+      handle = undefined
+      this.scratchController.signal.throwIfAborted()
+      await this.assertScratchDirectory(state)
+      if (previous !== undefined) {
+        await this.assertScratchFileIdentity(target, previous)
+        await rename(target, backup)
+        previousMoved = true
+        await this.assertScratchFileIdentity(backup, previous)
+        this.scratchController.signal.throwIfAborted()
+      }
+      await link(temporary, target)
+      published = true
+      await this.assertScratchFileIdentity(target, staged, true)
+      await rm(temporary)
+      await this.assertScratchFileIdentity(target, staged)
+      state.files.set(name, staged)
+      state.totalBytes = nextTotal
+      if (previousMoved && previous !== undefined) {
+        await this.assertScratchFileIdentity(backup, previous)
+        await rm(backup)
+        previousMoved = false
+      }
+    } catch (error: unknown) {
+      if (previousMoved && !published) {
+        // `link` is an atomic no-clobber restore. Keep the unique backup even
+        // when it succeeds: a concurrent actor may replace either name after
+        // the link, so deleting one here could delete data not owned by this
+        // transaction.
+        await link(backup, target).catch(() => {})
+      }
+      throw error
+    } finally {
+      /* v8 ignore next -- reaching cleanup with an open handle requires an injected fs write/sync failure. */
+      if (handle !== undefined) await handle.close().catch(() => {})
+      /* v8 ignore next -- cleanup failures are deliberately swallowed after the primary transaction failure. */
+      if (!published) await rm(temporary, { force: true }).catch(() => {})
+    }
+  }
+
+  /** Read one expected regular file through an owner-held no-follow descriptor. */
+  private async readScratch(state: ScratchState, name: string): Promise<string | undefined> {
+    const expected = state.files.get(name)
+    if (expected === undefined) return undefined
+    this.scratchController.signal.throwIfAborted()
+    await this.assertScratchDirectory(state)
+    const path = join(state.dir, name)
+    let before: Awaited<ReturnType<typeof lstat>>
+    try {
+      before = await lstat(path)
+    } catch (error: unknown) {
+      /* v8 ignore next -- safe component + verified directory leaves ENOENT as the only ordinary lstat failure. */
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      state.files.delete(name)
+      state.totalBytes -= expected.size
+      return undefined
+    }
+    if (!before.isFile() || before.isSymbolicLink()) {
+      throw new Error(`scratch path ${JSON.stringify(name)} is not a regular file`)
+    }
+    if (before.nlink !== 1) {
+      throw new Error(`scratch path ${JSON.stringify(name)} has multiple hard links`)
+    }
+    if (before.dev !== expected.device || before.ino !== expected.inode) {
+      throw new Error(`scratch path ${JSON.stringify(name)} changed after initialization`)
+    }
+    let handle: Awaited<ReturnType<typeof open>>
+    try {
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    } catch (error: unknown) {
+      /* v8 ignore next -- after successful lstat, a non-ENOENT open failure requires an external permission/type race. */
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      /* v8 ignore start -- disappearance between lstat() and open() is a real filesystem race that deterministic tests cannot order. */
+      state.files.delete(name)
+      state.totalBytes -= expected.size
+      return undefined
+      /* v8 ignore stop */
+    }
+    try {
+      const info = await handle.stat()
+      /* v8 ignore next -- a non-file descriptor requires a path replacement between lstat() and open(). */
+      if (!info.isFile()) throw new Error(`scratch path ${JSON.stringify(name)} is not a regular file`)
+      /* v8 ignore next -- inode mismatch requires a path replacement between lstat() and open(). */
+      if (info.dev !== before.dev || info.ino !== before.ino) {
+        /* v8 ignore next */
+        throw new Error(`scratch path ${JSON.stringify(name)} changed while opening`)
+      }
+      /* v8 ignore next -- link-count change requires an external hard-link race after open(). */
+      if (info.nlink !== 1) {
+        /* v8 ignore next */
+        throw new Error(`scratch path ${JSON.stringify(name)} gained a hard link while opening`)
+      }
+      if (info.size > this.hostLimits.scratch.maxFileBytes) {
+        throw new Error(`scratch file ${JSON.stringify(name)} exceeds the per-file quota`)
+      }
+      const bytes = await handle.readFile({ signal: this.scratchController.signal })
+      /* v8 ignore next -- growth after descriptor stat and before read completion is an external filesystem race. */
+      if (bytes.length > this.hostLimits.scratch.maxFileBytes) {
+        /* v8 ignore next */
+        throw new Error(`scratch file ${JSON.stringify(name)} grew beyond the per-file quota while reading`)
+      }
+      const nextTotal = state.totalBytes - expected.size + bytes.length
+      if (nextTotal > this.hostLimits.scratch.maxTotalBytes) {
+        throw new Error('scratch directory grew beyond the total quota while reading')
+      }
+      expected.size = bytes.length
+      state.totalBytes = nextTotal
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } finally {
+      await handle.close()
+    }
+  }
+
+  /** Reject a scratch path whose current inode is not the transaction-owned file. */
+  private async assertScratchFileIdentity(
+    path: string,
+    expected: ScratchFileState,
+    allowStagingLink = false,
+  ): Promise<void> {
+    const current = await lstat(path)
+    if (!current.isFile()
+      || current.isSymbolicLink()
+      || current.dev !== expected.device
+      || current.ino !== expected.inode
+      || current.nlink !== (allowStagingLink ? 2 : 1)) {
+      throw new Error(`scratch file ${JSON.stringify(path)} changed during publication`)
+    }
+  }
+
+  /** Reject a scratch directory that was replaced after lazy initialization. */
+  private async assertScratchDirectory(state: ScratchState): Promise<void> {
+    const current = await lstat(state.dir)
+    if (!current.isDirectory()
+      || current.isSymbolicLink()
+      || current.dev !== state.device
+      || current.ino !== state.inode) {
+      throw new Error('scratch directory changed after initialization')
     }
   }
 
@@ -588,6 +1153,12 @@ export class WorkerRun implements WorkflowRun {
       this.workerDeathObserved = true
       const outcomeWasClaimed = this.terminalClaimed
       const cancellationWasRequested = this.cancelReason !== undefined
+      // A valid Result may race physical worker exit while admitted unawaited
+      // scratch effects drain. Preserve those effects; every other death
+      // source aborts scratch publication before selecting its outcome.
+      if (!outcomeWasClaimed && !this.scratchController.signal.aborted) {
+        this.scratchController.abort('workflow worker gone')
+      }
       // When death is itself the terminal source, claim BEFORE child reap or
       // synthesized observer callbacks. Either can reenter cancel(); a death
       // that arrived first remains an error, while a cancellation already
@@ -598,9 +1169,14 @@ export class WorkerRun implements WorkflowRun {
       this.endStrandedAgents()
       if (!outcomeWasClaimed) {
         if (cancellationWasRequested) {
-          this.settleResult(this.cancelledResult(this.hostStarted))
+          this.settleResult(this.cancelledResult(this.observedAgentSpend()))
         } else {
-          this.settleResult({ value: null, stopReason: 'error', error: message, agentsStarted: this.hostStarted })
+          this.settleResult({
+            value: null,
+            stopReason: 'error',
+            error: message,
+            agentsStarted: this.observedAgentSpend(),
+          })
         }
       }
     }
@@ -649,7 +1225,18 @@ export class WorkerRun implements WorkflowRun {
     // first; the fallback guards the type, not a reachable path.
     /* v8 ignore next */
     const reason = this.cancelReason ?? 'workflow cancelled'
-    return { value: null, stopReason: 'cancelled', error: `workflow run cancelled: ${reason}`, agentsStarted }
+    return {
+      value: null,
+      stopReason: 'cancelled',
+      error: `workflow run cancelled: ${reason}`,
+      errorCode: 'CANCELLED',
+      agentsStarted,
+    }
+  }
+
+  /** Cumulative logical-agent spend the host can prove across resume attempts. */
+  private observedAgentSpend(): number {
+    return (this.init.initialAgentSpend ?? 0) + this.hostStarted
   }
 
   /** Remove the exact abort callback installed on the caller's start signal. */

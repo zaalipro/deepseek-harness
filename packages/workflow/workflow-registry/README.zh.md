@@ -28,7 +28,9 @@
 
 ## 服务契约
 
-`list(options)` 返回排序的调用无关摘要。`get(name, options)` 加载完整定义（meta + script + path + scope）。查找对 cwd 敏感且可中止。格式错误的定义文件会在发现阶段带着路径与原因大声失败。chokidar 监视器会使目录失效并发 `workflows/change`。
+`list(options)` 返回排序的调用无关摘要。`get(name, options)` 加载完整定义（meta + script + path + scope）。查找对 cwd 敏感且可中止。每个封套都通过 `ctx.fs.readBytesNoFollow` 打开，因此最终链接拒绝、普通文件验证和完整的字节有界读取共享同一个提供方对象。`save(envelope, options)` 使用带防护的 `ctx.fs.writeTextNoFollow`；创建／版本验证与最终条目发布保留在同一个提供方操作内，因此被替换的最终链接绝不会被跟随。无法提供任一保证的提供方会明确以 `FS_IO_ERROR` 失败。格式错误的定义文件会在发现阶段带着路径与原因大声失败。chokidar 监视器会使目录失效并发 `workflows/change`。
+
+生成的 `workflowDefinitions/list` Remote 接受会话 id 和可选的取消信号。Host 通过 Session lookup 解析该 id，只使用已解析会话记录的 cwd 选择发现目录；缺少 cwd 的会话会被拒绝，而不会回退到 Host 进程 cwd。其 `WorkflowDefinitionSummaryView` 结果仅包含 `name`、`description`、可选的 `whenToUse` 和 `scope`；该 Remote 不返回文件系统路径、阶段元数据或脚本。
 
 ## 模型体验
 
@@ -42,3 +44,4 @@
 
 - 只读取扁平 `.workflow.json` 封套；目录捆绑（`<name>/workflow.json` + `script.js`）不读取。
 - 完整定义在每次 `get()` 时重新从磁盘读取；注册表只缓存摘要。
+- 本地 Windows 文件系统提供方无法提供原子的最终组件不跟随读写。使用该提供方时，发现和 `save()` 会以 `FS_IO_ERROR` 明确失败；Windows 部署需要提供基于原生句柄等价操作的提供方。

@@ -101,8 +101,6 @@
     "@deepseek-ai/dsh-storage": "workspace:^",
     "@deepseek-ai/dsh-storage-domain": "workspace:^",
     "@deepseek-ai/dsh-storage-json": "workspace:^",
-    "@deepseek-ai/dsh-workflow-registry": "workspace:^",
-    "@deepseek-ai/dsh-workflow-supervisor": "workspace:^",
     "@deepseek-ai/dsh-command-workflows": "workspace:^",
     "@deepseek-ai/dsh-workspace": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^",

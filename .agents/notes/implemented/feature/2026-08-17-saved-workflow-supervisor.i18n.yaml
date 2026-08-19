@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-17-saved-workflow-supervisor.md
-2026-08-17-saved-workflow-supervisor.md: 1db8d9ec4a6bf4dc2576a4faeabd2e722e33322f
-2026-08-17-saved-workflow-supervisor.zh.md: 1c1adb658aed7b93c2683129798c85a25f0d70e5
+2026-08-17-saved-workflow-supervisor.md: d40a155e1f06e1a564938ed2323ca3b07ff015b2
+2026-08-17-saved-workflow-supervisor.zh.md: bfcfdf83e5a45df66e71b9a8386dd1ea11a44172

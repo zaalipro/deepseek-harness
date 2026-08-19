@@ -311,6 +311,104 @@ describe('dsh-workflow-worker-thread', () => {
       expect(starts).toBe(0)
     })
 
+    it('rejects invalid resume accounting before publishing a run', async () => {
+      const { ctx, parent } = await setup({ config: { maxTotalAgents: 2 } })
+      const entry = {
+        kind: 'agent' as const,
+        ordinal: 1,
+        seq: 1,
+        callId: 'root/agent:1',
+        fingerprint: '0'.repeat(64),
+        result: null,
+      }
+      const requests = [
+        { journal: [entry], initialAgentSpend: 0 },
+        { journal: [entry], initialAgentSpend: 1.5 },
+        { journal: [entry], initialAgentSpend: 3 },
+        { journal: [{ ...entry, seq: 0 }] },
+        { journal: [entry], initialAgentSpend: 1, initialAgentSeq: 0 },
+        { journal: [entry], initialAgentSpend: 1, initialAgentSeq: Number.MAX_SAFE_INTEGER },
+      ]
+      const errors: unknown[] = []
+      for (const resume of requests) {
+        try {
+          ctx.workflowEngine.start({ ...scripted("return 'unreachable'"), parent, ...resume })
+        } catch (error: unknown) {
+          errors.push(error)
+        }
+      }
+
+      expect(errors).toHaveLength(requests.length)
+      expect(errors.slice(0, 3)).toEqual(Array(3).fill(expect.objectContaining({
+        code: 'INVALID_ARGUMENT',
+        message: expect.stringContaining('initialAgentSpend') as unknown,
+      })))
+      expect(errors[3]).toMatchObject({ code: 'JOURNAL_DIVERGENCE' })
+      expect(errors.slice(4)).toEqual(Array(2).fill(expect.objectContaining({
+        code: 'INVALID_ARGUMENT',
+        message: expect.stringContaining('initialAgentSeq') as unknown,
+      })))
+    })
+
+    it('rejects an exotic replay journal before creating a worker', async () => {
+      const { ctx, parent } = await setup()
+      let starts = 0
+      ctx.on('workflow/start', () => { starts += 1 })
+      const malformed = [{
+        kind: 'agent',
+        ordinal: 1,
+        seq: 1,
+        callId: 'root/agent:1',
+        fingerprint: '0'.repeat(64),
+        result: new Map([['not', 'json']]),
+      }]
+
+      expect(() => ctx.workflowEngine.start({
+        ...scripted("return 'unreachable'"),
+        parent,
+        journal: malformed as never,
+      })).toThrow('journal must be lossless JSON data')
+      expect(starts).toBe(0)
+    })
+
+    it('supports an explicit validation-only request and projects its gate narration', async () => {
+      const { ctx, parent, provider } = await setup()
+      const gates: unknown[] = []
+      ctx.on('workflow/gate', (_info, gate) => { gates.push(gate) })
+      const logs: string[] = []
+      ctx.on('workflow/log', (_info, message) => { logs.push(message) })
+      const handle = ctx.workflowEngine.start({
+        ...scripted("await await_user('user', 'confirm'); return await agent('canned')"),
+        parent,
+        validateOnly: true,
+      })
+
+      await expect(handle.result).resolves.toMatchObject({
+        value: 'would await_user (user): confirm',
+        stopReason: 'completed',
+        agentsStarted: 0,
+      })
+      expect(provider.runs).toEqual([])
+      expect(gates).toEqual([])
+      expect(logs).toEqual(['would await_user (user): confirm'])
+      await handle.dispose()
+    })
+
+    it('projects a live gate and resumes it through the run handle', async () => {
+      const { ctx, parent } = await setup()
+      const gates: unknown[] = []
+      ctx.on('workflow/gate', (_info, gate) => { gates.push(gate) })
+      const handle = ctx.workflowEngine.start({
+        ...scripted("await await_user('user', 'confirm'); return 'continued'"),
+        parent,
+      })
+      await waitFor(() => { expect(gates).toEqual([{ kind: 'user', message: 'confirm', resumable: true }]) })
+      handle.resume()
+      await expect(handle.result).resolves.toMatchObject({ value: 'continued', stopReason: 'completed' })
+      handle.resume()
+      await handle.dispose()
+    })
+
     it('enforces a per-run total-agent cap below the engine ceiling', async () => {
       const { ctx, parent } = await setup({ config: { maxTotalAgents: 2 } })
       const handle = ctx.workflowEngine.start({
@@ -636,9 +734,14 @@ describe('dsh-workflow-worker-thread', () => {
     it('start() throws synchronously for invalid meta data or an unparseable body (host-side pre-checks)', async () => {
       const { ctx, parent } = await setup()
       // Meta is DATA — shape violations reject loud, every one named.
-      expect(() => ctx.workflowEngine.start({ script: 'return 1', meta: { name: '', description: 'd' }, parent })).toThrow(/meta\.name must be a non-empty string/)
+      expect(() => ctx.workflowEngine.start({ script: 'return 1', meta: { name: '', description: 'd' }, parent })).toThrow(/meta\.name must be 1-64 characters/)
       expect(() => ctx.workflowEngine.start({ script: 'return 1', meta: { name: 'x', description: 'd', extra: 1 } as unknown as WorkflowMeta, parent })).toThrow(/META_INVALID|not a recognized field/)
       expect(() => ctx.workflowEngine.start({ ...scripted('return ((('), parent })).toThrow(/does not parse/)
+      expect(() => ctx.workflowEngine.start({
+        ...scripted('return args'),
+        args: { shared: new SharedArrayBuffer(8) },
+        parent,
+      })).toThrow(/args must be losslessly JSON-serializable data/)
       // The likeliest authoring slip — a Claude Code-style meta header in the
       // body — gets a pointed message, not a bare SyntaxError.
       expect(() => ctx.workflowEngine.start({ ...scripted("export const meta = { name: 'x', description: 'd' }\nreturn 1"), parent })).toThrow(/meta rides the `meta` request field/)
@@ -646,12 +749,14 @@ describe('dsh-workflow-worker-thread', () => {
 
     it('cancel() aborts in-flight children (signal AND cancel RPC) and settles the run cancelled', async () => {
       const { ctx, parent, provider } = await setup({ manual: true })
+      const starts: unknown[] = []
+      ctx.on('workflow/agent-start', (_info, agent) => { starts.push(agent) })
       const ends: unknown[] = []
       ctx.on('workflow/agent-end', (_info, agent) => { ends.push(agent) })
       const runEnds: WorkflowResultInfo[] = []
       ctx.on('workflow/end', (_info, result) => { runEnds.push(result) })
       const handle = ctx.workflowEngine.start({ ...scripted("return await agent('long job')"), parent })
-      await waitFor(() => { expect(provider.runs.length).toBe(1) })
+      await waitFor(() => { expect(starts).toHaveLength(1) })
       handle.cancel('user stopped it')
       const result = await handle.result
       expect(result.stopReason).toBe('cancelled')
@@ -661,7 +766,7 @@ describe('dsh-workflow-worker-thread', () => {
       expect(ends).toEqual([expect.objectContaining({ seq: 1, outcome: 'cancelled' })])
       // workflow/end is an observer's only death signal: it fires for a
       // cancelled run too, mirroring the settled outcome data.
-      expect(runEnds).toEqual([{ stopReason: 'cancelled', error: result.error, agentsStarted: result.agentsStarted }])
+      expect(runEnds).toEqual([{ stopReason: 'cancelled', error: result.error, errorCode: 'CANCELLED', agentsStarted: result.agentsStarted }])
     })
 
     it('an already-aborted request signal cancels before the body ever runs (the go handshake holds it)', async () => {
@@ -754,16 +859,14 @@ describe('dsh-workflow-worker-thread', () => {
       ctx.on('workflow/log', (_info, message) => { narration.push(message) })
       ctx.on('workflow/phase', (_info, title) => { narration.push(`phase:${title}`) })
       const handle = ctx.workflowEngine.start({
-        // The sync spin keeps the worker's loop busy so the cancel message
-        // cannot be processed before the script settles `completed` — the
-        // worker posts a completed result that must LOSE to the in-flight
-        // host cancellation. The trailing narration exercises host-side
-        // suppression: posted pre-cancel-processing worker-side, arriving
-        // post-cancel host-side.
+        // Deliberately use the documented vm escape to model a hostile worker
+        // that reads a clock after the authored Date API was removed. The
+        // spin keeps later narration in the worker until cancellation wins.
         ...scripted(`
           log('started')
-          const end = Date.now() + 1000
-          while (Date.now() < end) {}
+          const clock = (${ESCAPE}).hrtime.bigint
+          const end = clock() + 1000000000n
+          while (clock() < end) {}
           phase('late phase')
           log('late log')
           return 'done'
@@ -772,6 +875,13 @@ describe('dsh-workflow-worker-thread', () => {
       })
       await waitFor(() => { expect(narration).toContain('started') })
       handle.cancel('raced the completion')
+      // Deliver a completion frame in the cancellation/result race window;
+      // the accepted cancellation remains authoritative.
+      const worker = (handle as unknown as { worker: Worker }).worker
+      worker.emit('message', {
+        type: WorkerToHostType.Result,
+        result: { value: 'late completion', stopReason: 'completed', agentsStarted: 0 },
+      })
       const result = await handle.result
       expect(result.stopReason).toBe('cancelled')
       expect(result.error).toContain('raced the completion')
@@ -793,7 +903,7 @@ describe('dsh-workflow-worker-thread', () => {
       expect(result.error).toContain('user aborted')
       // The grace force-settle fires workflow/end exactly like an ordinary
       // settlement — a terminated script's death still reaches observers.
-      expect(runEnds).toEqual([{ stopReason: 'cancelled', error: result.error, agentsStarted: 0 }])
+      expect(runEnds).toEqual([{ stopReason: 'cancelled', error: result.error, errorCode: 'CANCELLED', agentsStarted: 0 }])
       await handle.dispose()
     })
 
@@ -999,8 +1109,9 @@ describe('dsh-workflow-worker-thread', () => {
         ...scripted(`
           agent('survives until exit reap')
           for (let i = 0; i < 20; i++) await null
-          const end = Date.now() + 1500
-          while (Date.now() < end) {}
+          const clock = (${ESCAPE}).hrtime.bigint
+          const end = clock() + 1500000000n
+          while (clock() < end) {}
           return 'unreachable'
         `),
         parent,
@@ -1034,8 +1145,9 @@ describe('dsh-workflow-worker-thread', () => {
         ...scripted(`
           agent('wedged child')
           for (let i = 0; i < 20; i++) await null
-          const end = Date.now() + 1500
-          while (Date.now() < end) {}
+          const clock = (${ESCAPE}).hrtime.bigint
+          const end = clock() + 1500000000n
+          while (clock() < end) {}
           return 'raced'
         `),
         parent,
@@ -1095,8 +1207,9 @@ describe('dsh-workflow-worker-thread', () => {
         ...scripted(`
           const p = agent('slow')
           await agent('fast')
-          const end = Date.now() + 1500
-          while (Date.now() < end) {}
+          const clock = (${ESCAPE}).hrtime.bigint
+          const end = clock() + 1500000000n
+          while (clock() < end) {}
           return 'raced'
         `),
         parent,
@@ -1104,6 +1217,9 @@ describe('dsh-workflow-worker-thread', () => {
       await waitFor(() => { expect(order.filter(entry => entry.startsWith('start:')).length).toBe(2) })
       const fast = provider.runs.find(run => (run.request.prompt[0] as { text?: string }).text === 'fast')!
       fast.settle(text('fast done'))
+      await waitFor(() => {
+        expect(ends).toContainEqual({ seq: 2, outcome: 'completed' })
+      })
       handle.cancel('stop now')
       const result = await handle.result
       expect(result.stopReason).toBe('cancelled')
@@ -1412,14 +1528,29 @@ describe('dsh-workflow-worker-thread', () => {
   })
 
   describe('service API', () => {
-    it('run ids are unique and lifecycle meta is the run\'s borrowed immutable value', async () => {
+    it('rejects inconsistent scratch quota configuration at load', async () => {
+      const ctx = new Context()
+      await ctx.plugin(SubagentRuntime)
+      await expect(ctx.plugin(WorkerThreadWorkflowEngine, {
+        scratchMaxFileBytes: 2,
+        scratchMaxTotalBytes: 1,
+      })).rejects.toThrow('scratchMaxFileBytes cannot exceed scratchMaxTotalBytes')
+      await expect(ctx.plugin(WorkerThreadWorkflowEngine, {
+        scratchMaxOperations: 1,
+        scratchMaxPendingOperations: 2,
+      })).rejects.toThrow('scratchMaxPendingOperations cannot exceed scratchMaxOperations')
+      await ctx.fiber.dispose()
+    })
+
+    it('run ids are unique and lifecycle meta is an independent snapshot', async () => {
       const { ctx, parent } = await setup()
       let eventMeta: WorkflowRunInfo | undefined
       ctx.on('workflow/start', (info) => { eventMeta = info })
       const first = ctx.workflowEngine.start({ ...scripted('return 1'), parent })
       const second = ctx.workflowEngine.start({ ...scripted('return 2'), parent })
       expect(first.id).not.toBe(second.id)
-      expect(eventMeta!.meta).toBe(second.meta)
+      expect(eventMeta!.meta).toEqual(second.meta)
+      expect(eventMeta!.meta).not.toBe(second.meta)
       expect(second.meta.name).toBe('test-flow')
       await Promise.all([first.result, second.result])
       await first.dispose()

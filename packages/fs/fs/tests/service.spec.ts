@@ -127,6 +127,10 @@ describe('FileSystem provider seam', () => {
     const target = await fs.resolve('a.bin')
     expect(await fs.readBytes(target, undefined, 2)).toEqual(new TextEncoder().encode('hi'))
     await expect(fs.readBytes(target, undefined, 1)).rejects.toMatchObject({ code: 'FS_TOO_LARGE' })
+    await expect(fs.readBytesNoFollow('a.bin', {}, undefined, 2)).rejects.toMatchObject({ code: 'FS_IO_ERROR' })
+    await expect(fs.writeTextNoFollow(
+      'a.bin', {}, 'hi', { kind: 'createIfAbsent' },
+    )).rejects.toMatchObject({ code: 'FS_IO_ERROR' })
   })
 
   it('listDir returns child entry targets without reading file content', async () => {

@@ -28,7 +28,9 @@ The filename must equal `<meta.name>.workflow.json`; `meta.name` is kebab-case. 
 
 ## Service contract
 
-`list(options)` returns sorted invocation-neutral summaries. `get(name, options)` loads a full definition (meta + script + path + scope). Lookup is cwd-sensitive and abortable. A malformed definition file fails discovery loud with its path and reason. A chokidar watcher invalidates the catalog and emits `workflows/change`.
+`list(options)` returns sorted invocation-neutral summaries. `get(name, options)` loads a full definition (meta + script + path + scope). Lookup is cwd-sensitive and abortable. Each envelope is opened with `ctx.fs.readBytesNoFollow`, so final-link refusal, regular-file validation, and the complete byte-bounded read share one provider object. `save(envelope, options)` uses guarded `ctx.fs.writeTextNoFollow`; create/version validation and final-entry publication remain inside the provider operation, so a substituted final link is never followed. A provider without either guarantee fails loud with `FS_IO_ERROR`. A malformed definition file fails discovery loud with its path and reason. A chokidar watcher invalidates the catalog and emits `workflows/change`.
+
+The generated `workflowDefinitions/list` Remote accepts a session id and optional cancellation signal. The Host resolves that id through the Session lookup, selects discovery only from the resolved session's recorded cwd, and rejects a session without one instead of falling back to the Host process cwd. Its `WorkflowDefinitionSummaryView` result contains only `name`, `description`, optional `whenToUse`, and `scope`; the Remote does not return filesystem paths, phase metadata, or scripts.
 
 ## Model Experience
 
@@ -42,3 +44,4 @@ No direct invalidation; the named consumers own any request-prefix changes.
 
 - Only the flat `.workflow.json` envelope is read; a directory bundle (`<name>/workflow.json` + `script.js`) is not.
 - Full definitions are re-read from disk per `get()`; the registry caches only summaries.
+- The local Windows filesystem provider cannot supply atomic final-component no-follow reads or writes. With that provider, discovery and `save()` fail loud with `FS_IO_ERROR`; Windows deployments need a provider with native handle-based equivalents.

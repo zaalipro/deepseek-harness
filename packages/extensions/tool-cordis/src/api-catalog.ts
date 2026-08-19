@@ -450,6 +450,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the exact effect disposer that unregisters this definition.',
       },
       {
+        signature: 'registerFallback(definition: CommandDefinition): () => void',
+        description: 'Register a lowest-priority command used only when no ordinary global or scoped definition owns the name. This supports dynamic aliases that must yield continuously as built-in plugins mount and unmount.',
+        parameters: [{ name: 'definition', description: 'discovery metadata and direct UI handler.' }],
+        returns: 'the exact effect disposer that unregisters this fallback.',
+      },
+      {
         signature: '@Remote list(agent: Agent): readonly CommandDescriptor[]',
         description: 'List the effective immutable command descriptors for one agent.',
         parameters: [{ name: 'agent', description: 'exact receiving agent and scoped-layer key.' }],
@@ -620,6 +626,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Read the whole regular file as raw bytes with no decoding or binary rejection. The bound lives at this seam so a backend can never buffer an unbounded file: a target known or discovered to exceed `maxBytes` fails with `FS_TOO_LARGE` instead of returning a truncated result.',
         parameters: [{ name: 'target', description: 'the resolved target to read.' }, { name: 'signal', description: 'aborts the read.' }, { name: 'maxBytes', description: 'inclusive byte cap on the complete content.' }],
         returns: 'the full raw content, at most `maxBytes` long.',
+      },
+      {
+        signature: 'readBytesNoFollow( path: string, opts: { cwd?: string }, signal: AbortSignal | undefined, maxBytes: number, ): Promise<Uint8Array>',
+        description: 'Open a caller-supplied path without following its final symbolic-link component, require the opened object to be a regular file, and return its complete raw content through that same open object. Ancestor links follow the backend\'s normal path rules. Metadata validation and bounded content I/O must share one descriptor or equivalent provider-owned object; a provider that cannot guarantee this rejects with `FS_IO_ERROR` rather than emulating it with separate metadata and read operations.',
+        parameters: [{ name: 'path', description: 'the path to open; relative paths resolve against `opts.cwd`.' }, { name: 'opts', description: '`cwd` overrides the backend\'s default base for relative paths.' }, { name: 'signal', description: 'aborts before opening and between bounded reads.' }, { name: 'maxBytes', description: 'inclusive byte cap on the complete content.' }],
+        returns: 'the full raw content, at most `maxBytes` long.',
+      },
+      {
+        signature: 'writeTextNoFollow( path: string, opts: { cwd?: string }, content: string, expected: FsWriteIntent, signal?: AbortSignal, sandboxPolicy?: SandboxExecutionPolicy, ): Promise<FsWriteOutcome>',
+        description: 'Atomically publish complete UTF-8 text at a caller-supplied path without following its final symbolic-link component. The provider applies the required create/version guard inside this operation at publication. A final link observed before publication is rejected; one substituted after validation may be replaced as the destination path entry, but its target is never opened or mutated. Ancestor links follow the backend\'s normal path rules. A provider that cannot guarantee these semantics rejects with `FS_IO_ERROR` rather than composing `lstat`, `resolve`, and `writeText`.',
+        parameters: [{ name: 'path', description: 'the destination path; relative paths resolve against `opts.cwd`.' }, { name: 'opts', description: '`cwd` overrides the backend\'s default base for relative paths.' }, { name: 'content', description: 'the complete UTF-8 text to publish.' }, { name: 'expected', description: 'required guarded create or versioned replacement intent.' }, { name: 'signal', description: 'aborts before atomic publication takes effect.' }, { name: 'sandboxPolicy', description: 'the per-call mode and workspace root enforced by a sandboxing backend; omit to leave the backend its deployment default.' }],
+        returns: 'the publication outcome and resulting version.',
       },
       {
         signature: 'abstract listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]>',
@@ -2105,15 +2123,35 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'workflowRunRecorder',
+    summary: 'Records the logical lifecycle of launches that a Consumer explicitly attributes to a parent Session.',
+    description: 'Records the logical lifecycle of launches that a Consumer explicitly attributes to a parent Session.\n\nRecording is best-effort: the first failed append disables that run\'s later events and logs a warning without changing workflow execution. Each launch call claims at most one synchronously published run identity. Later member and terminal events use that stable identity across pause/resume attempts.',
+    methods: [
+      {
+        signature: 'launch(session: Session, start: () => Promise<WorkflowLaunched>): Promise<WorkflowLaunched>',
+        description: 'Attribute the one logical run started by `start` to `session`.\n\nThe callback owns execution and may reject unchanged. Lifecycle recording failures are contained. Callers must use this only for an independently presented top-level run; nested and internal launches call the supervisor directly.',
+        parameters: [{ name: 'session', description: 'exact parent Session that owns the durable Chat record.' }, { name: 'start', description: 'one callback that starts and returns the attributed run.' }],
+        returns: 'the supervisor\'s launch result unchanged.',
+      },
+    ],
+  },
+  {
     key: 'workflows',
     summary: 'Saved-workflow definition registry (`ctx.workflows`).',
-    description: 'Saved-workflow definition registry (`ctx.workflows`). Discoveries are cached per project root + root set; `workflows/change` invalidates them. A malformed definition file fails discovery loud with its path and reason.',
+    description: 'Saved-workflow definition registry (`ctx.workflows`). Discovery re-reads the roots on every call so a watcher miss cannot pin a stale catalog; the watcher only fires `workflows/change` as a faster refresh hint. A malformed definition file fails discovery loud with its path and reason.',
     methods: [
       {
         signature: 'async list(options: WorkflowLookupOptions = {}): Promise<WorkflowDefinitionSummary[]>',
         description: 'List invocation-neutral summaries for one workspace.',
         parameters: [{ name: 'options', description: '`cwd` selects the project root; `signal` cancels discovery.' }],
         returns: 'sorted winning summaries.',
+      },
+      {
+        signature: '@Remote(\'list\') async listForClient(session: Session, signal: AbortSignal): Promise<readonly WorkflowDefinitionSummaryView[]>',
+        description: 'List browser-safe summaries for the exact session workspace selected by the Remote Session lookup. The caller cannot supply or override a cwd.',
+        parameters: [{ name: 'session', description: 'resolved Session whose recorded cwd selects discovery.' }, { name: 'signal', description: 'cancellation for a superseded Client read.' }],
+        returns: 'sorted winning summaries without filesystem paths or scripts.',
+        throws: ['when the resolved session has no recorded cwd.'],
       },
       {
         signature: 'async snapshot(options: WorkflowLookupOptions = {}): Promise<WorkflowCatalogSnapshot>',
@@ -2127,61 +2165,144 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'name', description: 'kebab-case workflow name.' }, { name: 'options', description: '`cwd` selects the project root; `signal` cancels discovery.' }],
         returns: 'the full definition, or `undefined` when no scope supplies it.',
       },
+      {
+        signature: 'async save(envelope: WorkflowDefinitionEnvelope, options: WorkflowSaveOptions): Promise<string>',
+        description: 'Atomically create or replace one project/user definition through the filesystem capability. Final-component links are refused during initial validation and guarded provider publication; the required create/version intent stays inside the path-shaped publication operation.',
+        parameters: [{ name: 'envelope', description: 'metadata plus JavaScript body to persist.' }, { name: 'options', description: 'destination scope, workspace selector, and cancellation.' }],
+        returns: 'the filesystem provider\'s display path for the committed file.',
+      },
     ],
   },
   {
     key: 'workflowSupervisor',
-    summary: 'Run supervisor.',
-    description: 'Run supervisor. Background launch returns the display handle immediately; the supervisor owns the returned `WorkflowRun`, routes `workflow/*` events into each run\'s live view, and posts a completion notice to the parent session. Same-process pause saves the committed host-call journal; resume replays it under the original immutable script, args, and budget.',
+    summary: 'Logical workflow-run supervisor.',
+    description: 'Logical workflow-run supervisor.',
     methods: [
       {
-        signature: 'async start(spec: { definition?: WorkflowDefinition | undefined script?: string | undefined meta?: WorkflowMeta | undefined args?: unknown agentBudget?: number parent: Agent }): Promise<WorkflowLaunched>',
-        description: 'Launch one workflow run in the background (or smoke-check it).',
-        parameters: [{ name: 'spec', description: 'the run source, args, budget, and parent agent.' }],
-        returns: 'the display handle and started status immediately.',
+        signature: 'async recoverSession(agent: Agent, signal?: AbortSignal): Promise<void>',
+        description: 'Recover one Session roster and interrupt process-owned rows.',
+        parameters: [{ name: 'agent', description: 'exact Session owner used for authorization.' }, { name: 'signal', description: 'optional cancellation while reading durable state.' }],
       },
       {
-        signature: 'async validate(spec: { definition?: WorkflowDefinition | undefined script?: string | undefined meta?: WorkflowMeta | undefined args?: unknown parent?: Agent | undefined }): Promise<WorkflowValidation>',
-        description: 'Smoke-check one path with canned hosts; never starts a live run.',
-        parameters: [{ name: 'spec', description: 'the run source, args, and parent agent.' }],
-        returns: '`ok: true` with the smoke result, or `ok: false` with the failure.',
+        signature: 'async start(spec: { definition?: WorkflowDefinition script?: string meta?: WorkflowMeta args?: unknown agentBudget?: number parent: Agent signal?: AbortSignal }): Promise<WorkflowLaunched>',
+        description: 'Launch one logical run and return after durable background publication.',
+        parameters: [{ name: 'spec', description: 'selected source, budget, exact owner, and optional cancellation.' }],
+        returns: 'the stable logical id, display handle, and editable script path.',
       },
       {
-        signature: 'pause(displayName: string, agent: Agent): void',
-        description: 'Pause a running run: cancel it and keep the committed journal for resume.',
-        parameters: [{ name: 'displayName', description: 'the run\'s session display handle.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }],
+        signature: 'async validate(spec: { definition?: WorkflowDefinition script?: string meta?: WorkflowMeta args?: unknown agentBudget?: number parent?: Agent signal?: AbortSignal }): Promise<WorkflowValidation>',
+        description: 'Smoke-check one selected path with canned hosts and no logical run.',
+        parameters: [{ name: 'spec', description: 'selected source, budget, exact owner, and optional cancellation.' }],
+        returns: 'the validation result without retaining a run.',
+      },
+      {
+        signature: 'async pause(displayName: string, agent: Agent, signal?: AbortSignal): Promise<void>',
+        description: 'Quiesce a running attempt for journal-replay pause.',
+        parameters: [{ name: 'displayName', description: 'Session-local run handle.' }, { name: 'agent', description: 'exact live owner.' }, { name: 'signal', description: 'optional cancellation for the caller\'s wait.' }],
       },
       {
         signature: 'resume(displayName: string, agent: Agent): void',
-        description: 'Resume a parked gate (alive worker) or a paused run (journal replay).',
-        parameters: [{ name: 'displayName', description: 'the run\'s session display handle.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }],
+        description: 'Resume one live human gate or quiescent journal-replay pause.',
+        parameters: [{ name: 'displayName', description: 'Session-local run handle.' }, { name: 'agent', description: 'exact live owner.' }],
       },
       {
-        signature: 'resumeById(runId: string, agent: Agent): string',
-        description: 'Resume by internal run id (the model-facing tool path). Returns the display handle.',
-        parameters: [{ name: 'runId', description: 'the engine-minted run id returned by a launch.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }],
-        returns: 'the resumed run\'s display handle.',
+        signature: 'resumeById( runId: SupervisedWorkflowRunId | string, agent: Agent, higherBudget?: number, signal?: AbortSignal, ): string',
+        description: 'Resume by logical id, optionally raising a budget-limited cap.',
+        parameters: [{ name: 'runId', description: 'stable logical run id.' }, { name: 'agent', description: 'exact live owner.' }, { name: 'higherBudget', description: 'replacement absolute budget for a budget-limited run.' }, { name: 'signal', description: 'optional cancellation before a new attempt starts.' }],
+        returns: 'the Session-local display handle.',
       },
       {
-        signature: 'stop(displayName: string, agent: Agent): void',
-        description: 'Stop a run: cancel it and mark it cancelled.',
-        parameters: [{ name: 'displayName', description: 'the run\'s session display handle.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }],
+        signature: 'resumeGate( runId: SupervisedWorkflowRunId, executionId: WorkflowRunId, gateId: WorkflowGateId, agent: Agent, ): boolean',
+        description: 'Resume one question only while all logical, attempt, and gate ids remain current.',
+        parameters: [{ name: 'runId', description: 'stable logical run id.' }, { name: 'executionId', description: 'current engine-attempt id.' }, { name: 'gateId', description: 'current gate occurrence id.' }, { name: 'agent', description: 'exact live owner.' }],
+        returns: 'whether the fenced gate was resumed.',
       },
       {
-        signature: 'async save(displayName: string, agent: Agent, scope?: WorkflowSaveScope): Promise<string>',
-        description: 'Save the run\'s script projection as a project or user definition.',
-        parameters: [{ name: 'displayName', description: 'the run\'s session display handle.' }, { name: 'agent', description: 'the session-owning agent fencing the run.' }, { name: 'scope', description: 'target scope (`project` or `user`); defaults to the config value.' }],
-        returns: 'the written `.workflow.json` path.',
+        signature: 'async stop(displayName: string, agent: Agent, signal?: AbortSignal): Promise<void>',
+        description: 'Stop one nonterminal logical run and wait for attempt disposal.',
+        parameters: [{ name: 'displayName', description: 'Session-local run handle.' }, { name: 'agent', description: 'exact live owner.' }, { name: 'signal', description: 'optional cancellation for the caller\'s wait.' }],
       },
       {
-        signature: 'listRuns(agent?: Agent | undefined): WorkflowRunView[]',
-        description: 'List every retained run for one agent\'s session, live-first.',
-        parameters: [{ name: 'agent', description: 'the reading agent; a non-agent caller sees nothing.' }],
-        returns: 'the session\'s run views in start order (live runs first).',
+        signature: 'async save( displayName: string, agent: Agent, scope?: WorkflowSaveScope, signal?: AbortSignal, ): Promise<string>',
+        description: 'Save the current editable projection through the definition registry.',
+        parameters: [{ name: 'displayName', description: 'unnumbered, non-built-in run handle.' }, { name: 'agent', description: 'exact live owner.' }, { name: 'scope', description: 'optional destination overriding the configured default.' }, { name: 'signal', description: 'optional cancellation while reading and writing.' }],
+        returns: 'the saved definition path.',
+      },
+      {
+        signature: 'memberDetail(agent: Agent, request: WorkflowRunMemberRequest): WorkflowRunMemberDetail',
+        description: 'Return one bounded member outcome after exact Session authorization.',
+        parameters: [{ name: 'agent', description: 'Session used for authorization.' }, { name: 'request', description: 'logical run and member ids.' }],
+        returns: 'bounded member metadata and outcome.',
+      },
+      {
+        signature: 'async recordingSnapshot( agent: Agent, runId: SupervisedWorkflowRunId, signal?: AbortSignal, ): Promise<WorkflowRunRecordingSnapshot | undefined>',
+        description: 'Return one atomic, retention-bounded lifecycle snapshot after Session recovery. Host recorders use it to reconcile events missed during reload.',
+        parameters: [{ name: 'agent', description: 'exact Session owner used for authorization and recovery.' }, { name: 'runId', description: 'stable logical run id.' }, { name: 'signal', description: 'optional cancellation while durable state is recovered.' }],
+        returns: 'the retained run state, or `undefined` when successful recovery confirms that the run is absent.',
+        throws: ['When recovery fails, cancellation wins, or the id belongs to another recovered Session.'],
+      },
+      {
+        signature: 'async whenOwnerQuiescent(agent: Agent, signal?: AbortSignal): Promise<void>',
+        description: 'Reach a fixed point for background work owned by one exact Agent. Running attempts, starts that reserved capacity, durable terminal publication, completion delivery, and completion-woken Agent turns are all included. Human gates, user pauses, and budget-limited runs are quiescent parked states. A completion turn may launch more workflows; the fixed-point loop follows at most the configured consecutive completion-wake budget.',
+        parameters: [{ name: 'agent', description: 'exact workflow owner whose work must reach quiescence.' }, { name: 'signal', description: 'optional cancellation for the wait only.' }],
+      },
+      {
+        signature: '@Remote(\'list\') async listForClient( agent: Agent, request: WorkflowRunListRequest, signal: AbortSignal, ): Promise<WorkflowRunListPage>',
+        description: 'List one bounded retained-run page for the resolved Agent Session.',
+        parameters: [{ name: 'agent', description: 'Remote-resolved Session owner.' }, { name: 'request', description: 'page size and optional revision-fenced cursor.' }, { name: 'signal', description: 'cancellation for a superseded Remote read.' }],
+        returns: 'bounded run heads and an optional next-page cursor.',
+      },
+      {
+        signature: '@Remote(\'detail\') async detailForClient( agent: Agent, request: WorkflowRunRequest, signal: AbortSignal, ): Promise<WorkflowRunDetail>',
+        description: 'Load bounded selected-run metadata for the resolved Agent Session.',
+        parameters: [{ name: 'agent', description: 'Remote-resolved Session owner.' }, { name: 'request', description: 'selected logical run id.' }, { name: 'signal', description: 'cancellation for a superseded Remote read.' }],
+        returns: 'bounded detail for the selected run.',
+      },
+      {
+        signature: '@Remote(\'members\') async membersForClient( agent: Agent, request: WorkflowRunMembersRequest, signal: AbortSignal, ): Promise<WorkflowRunMemberPage>',
+        description: 'Load one bounded member-summary page for a selected run.',
+        parameters: [{ name: 'agent', description: 'Remote-resolved Session owner.' }, { name: 'request', description: 'selected run, page size, and optional cursor.' }, { name: 'signal', description: 'cancellation for a superseded Remote read.' }],
+        returns: 'bounded member heads and an optional next-page cursor.',
+      },
+      {
+        signature: '@Remote(\'memberDetail\') async memberDetailForClient( agent: Agent, request: WorkflowRunMemberRequest, signal: AbortSignal, ): Promise<WorkflowRunMemberDetail>',
+        description: 'Load one selected member\'s bounded committed outcome.',
+        parameters: [{ name: 'agent', description: 'Remote-resolved Session owner.' }, { name: 'request', description: 'selected logical run and member ids.' }, { name: 'signal', description: 'cancellation for a superseded Remote read.' }],
+        returns: 'bounded member detail.',
+      },
+      {
+        signature: '@Remote(\'logs\') async logsForClient( agent: Agent, request: WorkflowRunLogsRequest, signal: AbortSignal, ): Promise<WorkflowRunLogPage>',
+        description: 'Load one bounded retained log page for a selected run.',
+        parameters: [{ name: 'agent', description: 'Remote-resolved Session owner.' }, { name: 'request', description: 'selected run, page size, and optional cursor.' }, { name: 'signal', description: 'cancellation for a superseded Remote read.' }],
+        returns: 'bounded retained log lines and an optional next-page cursor.',
+      },
+      {
+        signature: '@Remote(\'result\') async resultForClient( agent: Agent, request: WorkflowRunRequest, signal: AbortSignal, ): Promise<WorkflowRunResultView>',
+        description: 'Load a selected run\'s bounded terminal-result projection.',
+        parameters: [{ name: 'agent', description: 'Remote-resolved Session owner.' }, { name: 'request', description: 'selected logical run id.' }, { name: 'signal', description: 'cancellation for a superseded Remote read.' }],
+        returns: 'bounded result state and revision.',
+      },
+      {
+        signature: '@Remote(\'artifacts\') async artifactsForClient( agent: Agent, request: WorkflowRunArtifactsRequest, signal: AbortSignal, ): Promise<WorkflowRunArtifactPage>',
+        description: 'Load one bounded scratch-artifact metadata page.',
+        parameters: [{ name: 'agent', description: 'Remote-resolved Session owner.' }, { name: 'request', description: 'selected run, page size, and optional cursor.' }, { name: 'signal', description: 'cancellation for the directory read.' }],
+        returns: 'bounded artifact metadata and an optional next-page cursor.',
+      },
+      {
+        signature: '@Remote(\'artifact\') async artifactForClient( agent: Agent, request: WorkflowRunArtifactRequest, signal: AbortSignal, ): Promise<WorkflowRunArtifactChunk>',
+        description: 'Read one UTF-8-safe scratch-artifact chunk without following links.',
+        parameters: [{ name: 'agent', description: 'Remote-resolved Session owner.' }, { name: 'request', description: 'selected run, artifact, byte limit, and optional cursor.' }, { name: 'signal', description: 'cancellation for the file read.' }],
+        returns: 'bounded UTF-8 text with byte offsets and an optional cursor.',
+      },
+      {
+        signature: '@Remote(\'control\') async controlForClient( agent: Agent, request: WorkflowRunControlRequest, signal: AbortSignal, ): Promise<WorkflowRunControlResult>',
+        description: 'Execute one revision-checked dashboard control to settlement.',
+        parameters: [{ name: 'agent', description: 'Remote-resolved exact run owner.' }, { name: 'request', description: 'run id, action, and optional expected revision.' }, { name: 'signal', description: 'cancellation for the control operation.' }],
+        returns: 'the authoritative run head after settlement.',
       },
       {
         signature: 'markInterrupted(): void',
-        description: 'Mark every live run interrupted on process exit (called via beforeExit hook).',
+        description: 'Cancel every process-owned nonterminal run as Interrupted.',
         parameters: [],
       },
     ],
@@ -2648,14 +2769,6 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'agent', description: 'the call identity plus its outcome.' }],
   },
   {
-    name: 'workflow/agent-result',
-    mode: 'emit',
-    signature: '\'workflow/agent-result\'(info: WorkflowRunInfo, seq: number, result: unknown): void',
-    summary: 'One committed `agent()` result, in call order — the journal a same-process resume replays instead of relaunching the child.',
-    description: 'One committed `agent()` result, in call order — the journal a same-process resume replays instead of relaunching the child. Emitted only for live calls (journal-replayed calls emit nothing).',
-    parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'seq', description: 'the 1-based agent() call sequence the result commits to.' }, { name: 'result', description: 'the script-visible result (text, structured object, or `null`).' }],
-  },
-  {
     name: 'workflow/agent-start',
     mode: 'emit',
     signature: '\'workflow/agent-start\'(info: WorkflowRunInfo, agent: WorkflowAgentInfo): void',
@@ -2678,6 +2791,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'The script parked the run on a human gate (a `pause()`/`await_user()` call).',
     description: 'The script parked the run on a human gate (a `pause()`/`await_user()` call). `resumable` distinguishes a gate resume passes (`await_user`) from one it re-fires (`pause`).',
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'gate', description: 'the gate kind, message, and resumability.' }],
+  },
+  {
+    name: 'workflow/journal-commit',
+    mode: 'emit',
+    signature: '\'workflow/journal-commit\'(info: WorkflowRunInfo, entry: WorkflowJournalEntry): void',
+    summary: 'One host call appended to the logical journal in consecutive commit-publication order.',
+    description: 'One host call appended to the logical journal in consecutive commit-publication order. A same-process resume matches the stable call identity and replays the entry instead of repeating its result or effect. Replayed calls emit nothing.',
+    parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'entry', description: 'committed call identity, fingerprint, kind, and optional result.' }],
   },
   {
     name: 'workflow/log',
@@ -2712,12 +2833,52 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [],
   },
   {
+    name: 'workflows/gate-request',
+    mode: 'emit',
+    signature: '\'workflows/gate-request\'(request: WorkflowGateRequest): void',
+    summary: 'One live workflow attempt parked for human input.',
+    description: 'One live workflow attempt parked for human input.',
+    parameters: [{ name: 'request', description: 'attempt-fenced {@link WorkflowGateRequest} and exact owner.' }],
+  },
+  {
+    name: 'workflows/member-end',
+    mode: 'emit',
+    signature: '\'workflows/member-end\'(info: SupervisedWorkflowRunInfo, member: SupervisedWorkflowMemberLifecycleInfo): void',
+    summary: 'One launched child settled within its logical workflow run.',
+    description: 'One launched child settled within its logical workflow run.',
+    parameters: [{ name: 'info', description: 'stable {@link SupervisedWorkflowRunInfo} identity.' }, { name: 'member', description: 'settled {@link SupervisedWorkflowMemberLifecycleInfo} including its child Session id.' }],
+  },
+  {
+    name: 'workflows/member-start',
+    mode: 'emit',
+    signature: '\'workflows/member-start\'(info: SupervisedWorkflowRunInfo, member: SupervisedWorkflowMemberLifecycleInfo): void',
+    summary: 'One child launch joined a published logical workflow run.',
+    description: 'One child launch joined a published logical workflow run.',
+    parameters: [{ name: 'info', description: 'stable {@link SupervisedWorkflowRunInfo} identity.' }, { name: 'member', description: 'launched {@link SupervisedWorkflowMemberLifecycleInfo} including its child Session id.' }],
+  },
+  {
     name: 'workflows/run-change',
     mode: 'emit',
-    signature: '\'workflows/run-change\'(): void',
-    summary: 'One supervised run\'s visible set changed (start, progress, park, settle, pause, resume, stop, save).',
-    description: 'One supervised run\'s visible set changed (start, progress, park, settle, pause, resume, stop, save). Unfiltered; consumers re-read `listRuns`.',
-    parameters: [],
+    signature: '\'workflows/run-change\'(change: WorkflowRunChange): void',
+    summary: 'One bounded supervisor change for one owning Session.',
+    description: 'One bounded supervisor change for one owning Session.',
+    parameters: [{ name: 'change', description: 'revisioned row update, removal, or baseline invalidation.' }],
+  },
+  {
+    name: 'workflows/run-end',
+    mode: 'emit',
+    signature: '\'workflows/run-end\'(info: SupervisedWorkflowRunInfo, result: SupervisedWorkflowResultInfo): void',
+    summary: 'One logical workflow run reached its exact-once terminal publication.',
+    description: 'One logical workflow run reached its exact-once terminal publication.',
+    parameters: [{ name: 'info', description: 'stable {@link SupervisedWorkflowRunInfo} identity.' }, { name: 'result', description: 'bounded {@link SupervisedWorkflowResultInfo} without the result value.' }],
+  },
+  {
+    name: 'workflows/run-start',
+    mode: 'emit',
+    signature: '\'workflows/run-start\'(info: SupervisedWorkflowRunInfo): void',
+    summary: 'One logical workflow run was durably published before its first member.',
+    description: 'One logical workflow run was durably published before its first member.',
+    parameters: [{ name: 'info', description: 'stable {@link SupervisedWorkflowRunInfo} identity.' }],
   },
 ]
 
@@ -3341,7 +3502,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'JsonSchemaNode',
-    declaration: 'export interface JsonSchemaNode {\n    type?: JsonSchemaType;\n    oneOf?: JsonSchemaNode[];\n    properties?: Record<string, JsonSchemaNode>;\n    required?: string[];\n    additionalProperties?: boolean;\n    items?: JsonSchemaNode;\n    enum?: JsonSchemaScalar[];\n    const?: JsonSchemaScalar;\n    description?: string;\n    title?: string;\n    default?: JsonValue;\n    examples?: JsonValue;\n}',
+    declaration: 'export interface JsonSchemaNode {\n    type?: JsonSchemaType;\n    oneOf?: JsonSchemaNode[];\n    properties?: Record<string, JsonSchemaNode>;\n    required?: string[];\n    additionalProperties?: boolean;\n    items?: JsonSchemaNode;\n    minItems?: number;\n    maxItems?: number;\n    enum?: JsonSchemaScalar[];\n    const?: JsonSchemaScalar;\n    description?: string;\n    title?: string;\n    default?: JsonValue;\n    examples?: JsonValue;\n}',
   },
   {
     name: 'JsonSchemaScalar',
@@ -4332,6 +4493,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SubprocessTerminalSpawnSpec {\n    argv: readonly string[];\n    cwd: string;\n    env?: Record<string, string> | undefined;\n    rows: number;\n    cols: number;\n    graceMs: number;\n    signal?: AbortSignal | undefined;\n}',
   },
   {
+    name: 'SupervisedWorkflowMemberLifecycleInfo',
+    declaration: 'export interface SupervisedWorkflowMemberLifecycleInfo extends WorkflowRunMemberHead {\n    readonly childSessionId: SessionId;\n}',
+  },
+  {
+    name: 'SupervisedWorkflowResultInfo',
+    declaration: 'export interface SupervisedWorkflowResultInfo {\n    readonly stopReason: SupervisedWorkflowStopReason;\n    readonly error?: string;\n    readonly agentsStarted: number;\n}',
+  },
+  {
+    name: 'SupervisedWorkflowRunInfo',
+    declaration: 'export interface SupervisedWorkflowRunInfo {\n    readonly id: SupervisedWorkflowRunId;\n    readonly displayName: string;\n    readonly name: string;\n}',
+  },
+  {
+    name: 'SupervisedWorkflowStopReason',
+    declaration: 'export type SupervisedWorkflowStopReason = \'completed\' | \'cancelled\' | \'error\' | \'interrupted\';',
+  },
+  {
     name: 'SurfaceEvent',
     declaration: 'export type SurfaceEvent = SessionEvent<SurfaceEventType> & {\n    surfaceOp: SurfaceOp;\n};',
   },
@@ -4732,8 +4909,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface WorkflowDefinition extends WorkflowDefinitionSummary {\n    readonly script: string;\n}',
   },
   {
+    name: 'WorkflowDefinitionEnvelope',
+    declaration: 'export interface WorkflowDefinitionEnvelope {\n    readonly meta: WorkflowMeta;\n    readonly script: string;\n}',
+  },
+  {
     name: 'WorkflowDefinitionSummary',
-    declaration: 'export interface WorkflowDefinitionSummary {\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly phases?: readonly WorkflowPhase[];\n    readonly scope: WorkflowScope;\n    readonly path?: string;\n}',
+    declaration: 'export interface WorkflowDefinitionSummary extends WorkflowDefinitionSummaryView {\n    readonly phases?: readonly WorkflowPhase[];\n    readonly path: string;\n}',
+  },
+  {
+    name: 'WorkflowDefinitionSummaryView',
+    declaration: 'export interface WorkflowDefinitionSummaryView {\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly scope: WorkflowScope;\n}',
+  },
+  {
+    name: 'WorkflowErrorCode',
+    declaration: 'export type WorkflowErrorCode = \'SCRIPT_PARSE\' | \'META_INVALID\' | \'INVALID_ARGUMENT\' | \'UNSUPPORTED_OPTION\' | \'UNSUPPORTED_SCHEMA\' | \'AGENT_CAP\' | \'ITEM_CAP\' | \'AGENT_START\' | \'AGENT_RESULT\' | \'JOURNAL_DIVERGENCE\' | \'RESULT_UNSERIALIZABLE\' | \'CANCELLED\';',
   },
   {
     name: 'WorkflowGateInfo',
@@ -4744,12 +4933,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type WorkflowGateKind = \'user\' | \'back_off\' | \'no_progress\' | \'verification\' | \'infra\';',
   },
   {
+    name: 'WorkflowGateRequest',
+    declaration: 'export interface WorkflowGateRequest {\n    readonly info: SupervisedWorkflowRunInfo;\n    readonly executionId: WorkflowRunId;\n    readonly gateId: WorkflowGateId;\n    readonly gate: WorkflowGateInfo;\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n}',
+  },
+  {
     name: 'WorkflowJournalEntry',
-    declaration: 'export interface WorkflowJournalEntry {\n    readonly seq: number;\n    readonly result: unknown;\n}',
+    declaration: 'export type WorkflowJournalEntry = WorkflowJournalBase & ({\n    readonly kind: \'agent\';\n    readonly seq: number;\n    readonly result: JsonValue;\n} | {\n    readonly kind: \'phase\';\n    readonly title: string;\n} | {\n    readonly kind: \'log\';\n    readonly message: string;\n} | {\n    readonly kind: \'scratch-read\';\n    readonly content?: string;\n} | {\n    readonly kind: \'scratch-write\';\n} | {\n    readonly kind: \'await-user\';\n});',
   },
   {
     name: 'WorkflowLaunched',
-    declaration: 'export interface WorkflowLaunched {\n    readonly displayName: string;\n    readonly runId: WorkflowRunId;\n    readonly scriptPath?: string;\n    readonly status: \'started\';\n}',
+    declaration: 'export interface WorkflowLaunched {\n    readonly displayName: string;\n    readonly runId: SupervisedWorkflowRunId;\n    readonly scriptPath?: string;\n    readonly status: \'started\';\n}',
   },
   {
     name: 'WorkflowLookupOptions',
@@ -4765,15 +4958,71 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowResult',
-    declaration: 'export interface WorkflowResult {\n    value: unknown;\n    stopReason: WorkflowStopReason;\n    error?: string;\n    agentsStarted: number;\n}',
+    declaration: 'export interface WorkflowResult {\n    value: JsonValue;\n    stopReason: WorkflowStopReason;\n    error?: string;\n    errorCode?: WorkflowErrorCode;\n    agentsStarted: number;\n}',
   },
   {
     name: 'WorkflowResultInfo',
-    declaration: 'export interface WorkflowResultInfo {\n    stopReason: WorkflowStopReason;\n    error?: string;\n    agentsStarted: number;\n}',
+    declaration: 'export interface WorkflowResultInfo {\n    stopReason: WorkflowStopReason;\n    error?: string;\n    errorCode?: WorkflowErrorCode;\n    agentsStarted: number;\n}',
   },
   {
     name: 'WorkflowRun',
     declaration: 'export interface WorkflowRun {\n    readonly id: WorkflowRunId;\n    readonly meta: WorkflowMeta;\n    readonly result: Promise<WorkflowResult>;\n    cancel(reason?: string): void;\n    resume(): void;\n    dispose(): Promise<void>;\n}',
+  },
+  {
+    name: 'WorkflowRunAction',
+    declaration: 'export type WorkflowRunAction = \'pause\' | \'resume\' | \'stop\' | \'save\';',
+  },
+  {
+    name: 'WorkflowRunArtifactChunk',
+    declaration: 'export interface WorkflowRunArtifactChunk {\n    readonly artifact: WorkflowRunArtifactView;\n    readonly text: string;\n    readonly offsetBytes: number;\n    readonly returnedBytes: number;\n    readonly totalBytes: number;\n    readonly revision: number;\n    readonly nextCursor?: WorkflowRunCursor;\n}',
+  },
+  {
+    name: 'WorkflowRunArtifactPage',
+    declaration: 'export interface WorkflowRunArtifactPage {\n    readonly items: readonly WorkflowRunArtifactView[];\n    readonly nextCursor?: WorkflowRunCursor;\n    readonly omitted: number;\n    readonly total: number;\n    readonly revision: number;\n}',
+  },
+  {
+    name: 'WorkflowRunArtifactRequest',
+    declaration: 'export interface WorkflowRunArtifactRequest extends WorkflowRunRequest {\n    readonly name: string;\n    readonly cursor?: WorkflowRunCursor;\n    readonly maxBytes?: number;\n    readonly expectedRevision?: number;\n}',
+  },
+  {
+    name: 'WorkflowRunArtifactsRequest',
+    declaration: 'export interface WorkflowRunArtifactsRequest extends WorkflowRunRequest {\n    readonly cursor?: WorkflowRunCursor;\n    readonly limit?: number;\n}',
+  },
+  {
+    name: 'WorkflowRunArtifactView',
+    declaration: 'export interface WorkflowRunArtifactView {\n    readonly name: string;\n    readonly bytes: number;\n}',
+  },
+  {
+    name: 'WorkflowRunAvailableValue',
+    declaration: 'export type WorkflowRunAvailableValue = {\n    readonly state: \'available\';\n    readonly content: {\n        readonly kind: \'value\';\n        readonly value: JsonValue;\n    };\n    readonly totalBytes: number;\n    readonly truncated: false;\n} | {\n    readonly state: \'available\';\n    readonly content: {\n        readonly kind: \'preview\';\n        readonly text: string;\n    };\n    readonly totalBytes: number;\n    readonly truncated: true;\n};',
+  },
+  {
+    name: 'WorkflowRunChange',
+    declaration: 'export type WorkflowRunChange = {\n    readonly kind: \'invalidate-all\';\n} | {\n    readonly kind: \'upsert\';\n    readonly sessionId: SessionId;\n    readonly epoch: WorkflowRunFeedEpoch;\n    readonly sessionRevision: number;\n    readonly head: WorkflowRunHead;\n} | {\n    readonly kind: \'remove\';\n    readonly sessionId: SessionId;\n    readonly epoch: WorkflowRunFeedEpoch;\n    readonly sessionRevision: number;\n    readonly runId: SupervisedWorkflowRunId;\n} | {\n    readonly kind: \'invalidate\';\n    readonly sessionId: SessionId;\n    readonly epoch: WorkflowRunFeedEpoch;\n    readonly sessionRevision: number;\n};',
+  },
+  {
+    name: 'WorkflowRunControlRequest',
+    declaration: 'export interface WorkflowRunControlRequest extends WorkflowRunRequest {\n    readonly action: WorkflowRunAction;\n    readonly expectedRevision?: number;\n}',
+  },
+  {
+    name: 'WorkflowRunControlResult',
+    declaration: 'export interface WorkflowRunControlResult {\n    readonly run: WorkflowRunHead;\n}',
+  },
+  {
+    name: 'WorkflowRunCursor',
+    declaration: 'export type WorkflowRunCursor = Branded<\'WorkflowRunCursor\'>;',
+  },
+  {
+    name: 'WorkflowRunDetail',
+    declaration: 'export interface WorkflowRunDetail {\n    readonly run: WorkflowRunHead;\n    readonly phases?: readonly WorkflowPhase[];\n    readonly gate?: WorkflowGateInfo;\n    readonly error?: string;\n    readonly scriptPath?: string;\n}',
+  },
+  {
+    name: 'WorkflowRunFeedEpoch',
+    declaration: 'export type WorkflowRunFeedEpoch = Branded<\'WorkflowRunFeedEpoch\'>;',
+  },
+  {
+    name: 'WorkflowRunHead',
+    declaration: 'export interface WorkflowRunHead {\n    readonly runId: SupervisedWorkflowRunId;\n    readonly displayName: string;\n    readonly name: string;\n    readonly description: string;\n    readonly status: WorkflowRunStatus;\n    readonly phase?: string;\n    readonly budget: {\n        readonly total: number;\n        readonly spent: number;\n        readonly remaining: number;\n    };\n    readonly memberCounts: WorkflowRunMemberCounts;\n    readonly startedAt: number;\n    readonly settledAt?: number;\n    readonly allowedActions: readonly WorkflowRunAction[];\n    readonly revision: number;\n    readonly detailRevision: number;\n    readonly membersRevision: number;\n    readonly logsRevision: number;\n    readonly resultRevision: number;\n    readonly artifactsRevision: number;\n}',
   },
   {
     name: 'WorkflowRunId',
@@ -4784,16 +5033,72 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface WorkflowRunInfo {\n    id: WorkflowRunId;\n    meta: WorkflowMeta;\n}',
   },
   {
-    name: 'WorkflowRunMemberView',
-    declaration: 'export interface WorkflowRunMemberView {\n    readonly seq: number;\n    readonly label: string;\n    readonly phase?: string;\n    readonly status: \'running\' | \'completed\' | \'failed\' | \'cancelled\';\n}',
+    name: 'WorkflowRunListPage',
+    declaration: 'export interface WorkflowRunListPage {\n    readonly epoch: WorkflowRunFeedEpoch;\n    readonly sessionRevision: number;\n    readonly items: readonly WorkflowRunHead[];\n    readonly nextCursor?: WorkflowRunCursor;\n    readonly total: number;\n}',
   },
   {
-    name: 'WorkflowRunView',
-    declaration: 'export interface WorkflowRunView {\n    readonly runId: WorkflowRunId;\n    readonly displayName: string;\n    readonly name: string;\n    readonly description: string;\n    readonly status: WorkflowRunStatus;\n    readonly phase?: string;\n    readonly phases?: readonly WorkflowPhase[];\n    readonly budget: {\n        readonly total: number;\n        readonly spent: number;\n        readonly remaining: number;\n    };\n    readonly members: readonly WorkflowRunMemberView[];\n    readonly logs: readonly string[];\n    readonly result?: unknown;\n    readonly error?: string;\n    readonly gate?: WorkflowGateInfo;\n    readonly builtin: boolean;\n    readonly numberedHandle: boolean;\n    readonly scriptPath?: string;\n    readonly startedAt: number;\n    readonly settledAt?: number;\n}',
+    name: 'WorkflowRunListRequest',
+    declaration: 'export interface WorkflowRunListRequest {\n    readonly cursor?: WorkflowRunCursor;\n    readonly limit?: number;\n}',
   },
   {
-    name: 'WorkflowSaveScope',
-    declaration: 'export type WorkflowSaveScope = Extract<WorkflowScope, \'project\' | \'user\'>;',
+    name: 'WorkflowRunLogLine',
+    declaration: 'export interface WorkflowRunLogLine {\n    readonly index: number;\n    readonly text: string;\n}',
+  },
+  {
+    name: 'WorkflowRunLogPage',
+    declaration: 'export interface WorkflowRunLogPage {\n    readonly items: readonly WorkflowRunLogLine[];\n    readonly nextCursor?: WorkflowRunCursor;\n    readonly evicted: number;\n    readonly total: number;\n    readonly revision: number;\n}',
+  },
+  {
+    name: 'WorkflowRunLogsRequest',
+    declaration: 'export interface WorkflowRunLogsRequest extends WorkflowRunRequest {\n    readonly cursor?: WorkflowRunCursor;\n    readonly limit?: number;\n}',
+  },
+  {
+    name: 'WorkflowRunMemberCounts',
+    declaration: 'export interface WorkflowRunMemberCounts {\n    readonly total: number;\n    readonly running: number;\n    readonly completed: number;\n    readonly failed: number;\n    readonly cancelled: number;\n}',
+  },
+  {
+    name: 'WorkflowRunMemberDetail',
+    declaration: 'export interface WorkflowRunMemberDetail {\n    readonly member: WorkflowRunMemberHead;\n    readonly childSessionId: SessionId;\n    readonly outcome: WorkflowRunValueView;\n}',
+  },
+  {
+    name: 'WorkflowRunMemberHead',
+    declaration: 'export interface WorkflowRunMemberHead {\n    readonly memberId: WorkflowMemberId;\n    readonly seq: number;\n    readonly label: string;\n    readonly phase?: string;\n    readonly status: \'running\' | \'completed\' | \'failed\' | \'cancelled\';\n    readonly startedAt?: number;\n    readonly settledAt?: number;\n    readonly outcome: WorkflowRunOutcomeState;\n}',
+  },
+  {
+    name: 'WorkflowRunMemberPage',
+    declaration: 'export interface WorkflowRunMemberPage {\n    readonly items: readonly WorkflowRunMemberHead[];\n    readonly nextCursor?: WorkflowRunCursor;\n    readonly total: number;\n    readonly revision: number;\n}',
+  },
+  {
+    name: 'WorkflowRunMemberRequest',
+    declaration: 'export interface WorkflowRunMemberRequest extends WorkflowRunRequest {\n    readonly memberId: WorkflowMemberId;\n}',
+  },
+  {
+    name: 'WorkflowRunMembersRequest',
+    declaration: 'export interface WorkflowRunMembersRequest extends WorkflowRunRequest {\n    readonly cursor?: WorkflowRunCursor;\n    readonly limit?: number;\n}',
+  },
+  {
+    name: 'WorkflowRunOutcomeState',
+    declaration: 'export type WorkflowRunOutcomeState = \'pending\' | \'available\' | \'not-produced\' | \'evicted\';',
+  },
+  {
+    name: 'WorkflowRunRecordingSnapshot',
+    declaration: 'export interface WorkflowRunRecordingSnapshot {\n    readonly info: SupervisedWorkflowRunInfo;\n    readonly run: WorkflowRunHead;\n    readonly members: readonly SupervisedWorkflowMemberLifecycleInfo[];\n    readonly result?: SupervisedWorkflowResultInfo;\n}',
+  },
+  {
+    name: 'WorkflowRunRequest',
+    declaration: 'export interface WorkflowRunRequest {\n    readonly runId: SupervisedWorkflowRunId;\n}',
+  },
+  {
+    name: 'WorkflowRunResultView',
+    declaration: 'export interface WorkflowRunResultView {\n    readonly value: WorkflowRunValueView;\n    readonly error?: string;\n    readonly revision: number;\n}',
+  },
+  {
+    name: 'WorkflowRunValueView',
+    declaration: 'export type WorkflowRunValueView = {\n    readonly state: \'pending\';\n} | {\n    readonly state: \'not-produced\';\n} | {\n    readonly state: \'evicted\';\n} | WorkflowRunAvailableValue;',
+  },
+  {
+    name: 'WorkflowSaveOptions',
+    declaration: 'export interface WorkflowSaveOptions extends WorkflowLookupOptions {\n    readonly scope: WorkflowSaveScope;\n}',
   },
   {
     name: 'WorkflowScope',
@@ -4801,7 +5106,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowStartRequest',
-    declaration: 'export interface WorkflowStartRequest {\n    script: string;\n    meta: WorkflowMeta;\n    args?: unknown;\n    subagentProvider?: string;\n    maxTotalAgents?: number;\n    journal?: readonly WorkflowJournalEntry[];\n    scratchDir?: string;\n    validateOnly?: boolean;\n    parent: Agent;\n    signal?: AbortSignal;\n}',
+    declaration: 'export interface WorkflowStartRequest {\n    script: string;\n    meta: WorkflowMeta;\n    args?: unknown;\n    subagentProvider?: string;\n    maxTotalAgents?: number;\n    initialAgentSpend?: number;\n    initialAgentSeq?: number;\n    journal?: readonly WorkflowJournalEntry[];\n    scratchDir?: string;\n    validateOnly?: boolean;\n    parent: Agent;\n    signal?: AbortSignal;\n}',
   },
   {
     name: 'WorkflowStopReason',

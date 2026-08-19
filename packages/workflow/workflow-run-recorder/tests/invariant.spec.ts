@@ -2,15 +2,16 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import InvariantRegistry, { InvariantError } from '@deepseek-ai/dsh-invariants'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
-import { WorkflowRunId, type WorkflowRunId as WorkflowRunIdType } from '@deepseek-ai/dsh-workflow/types'
-import * as ToolWorkflowInvariant from '../src/invariant.ts'
+import { SupervisedWorkflowRunId } from '@deepseek-ai/dsh-workflow-supervisor'
+import type { SupervisedWorkflowRunId as LogicalRunId } from '@deepseek-ai/dsh-workflow-supervisor/types'
+import * as WorkflowRunRecorderInvariant from '../src/invariant.ts'
 import type {} from '../src/types.ts'
 
 async function setup(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(InvariantRegistry, { enabled: true })
-  await ctx.plugin(ToolWorkflowInvariant)
+  await ctx.plugin(WorkflowRunRecorderInvariant)
   return ctx
 }
 
@@ -20,9 +21,9 @@ describe('durable workflow-record invariants', () => {
     const session = ctx.sessions.create(SessionId('workflow-record-valid'))
     session.append('turn/start', { turn: 1 })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    const first = WorkflowRunId('first')
-    const second = WorkflowRunId('second')
-    const third = WorkflowRunId('third')
+    const first = SupervisedWorkflowRunId('first')
+    const second = SupervisedWorkflowRunId('second')
+    const third = SupervisedWorkflowRunId('third')
     session.append('tool-workflow/run-start', { runId: first, name: 'first' })
     session.append('tool-workflow/run-start', { runId: second, name: 'second' })
     session.append('tool-workflow/agent-start', {
@@ -37,23 +38,29 @@ describe('durable workflow-record invariants', () => {
     })
     session.append('tool-workflow/agent-end', { runId: third, seq: 1, outcome: 'failed' })
     session.append('tool-workflow/run-end', { runId: third, stopReason: 'error' })
-    session.append('tool-workflow/run-start', { runId: WorkflowRunId('prefix'), name: 'prefix' })
+    session.append('tool-workflow/run-start', {
+      runId: SupervisedWorkflowRunId('interrupted'), name: 'interrupted',
+    })
+    session.append('tool-workflow/run-end', {
+      runId: SupervisedWorkflowRunId('interrupted'), stopReason: 'interrupted',
+    })
+    session.append('tool-workflow/run-start', { runId: SupervisedWorkflowRunId('prefix'), name: 'prefix' })
     expect(() => session.append('tool-workflow/agent-start', {
-      runId: WorkflowRunId('prefix'), seq: 1, label: 'open', childId: SessionId('open-child'),
+      runId: SupervisedWorkflowRunId('prefix'), seq: 1, label: 'open', childId: SessionId('open-child'),
     })).not.toThrow()
   })
 
   it('rejects a malformed candidate before commit and keeps the fold reusable', async () => {
     const ctx = await setup()
     const session = ctx.sessions.create(SessionId('workflow-record-invalid'))
-    const runId = WorkflowRunId('run')
+    const runId = SupervisedWorkflowRunId('run')
     session.append('tool-workflow/run-start', { runId, name: 'run' })
     const before = session.seq
     expect(() => session.append('tool-workflow/agent-end', {
       runId, seq: 1, outcome: 'completed',
     })).toThrow(expect.objectContaining<Partial<InvariantError>>({
       code: 'INVARIANT',
-      packageName: '@deepseek-ai/dsh-tool-workflow',
+      packageName: '@deepseek-ai/dsh-workflow-run-recorder',
     }))
     expect(session.seq).toBe(before)
     expect(() => session.append('tool-workflow/run-end', {
@@ -61,7 +68,7 @@ describe('durable workflow-record invariants', () => {
     })).not.toThrow()
   })
 
-  type Mutation = (session: Session, runId: WorkflowRunIdType) => void
+  type Mutation = (session: Session, runId: LogicalRunId) => void
   const appendRaw = (session: Session, type: string, data: unknown): void => {
     const append = session.append.bind(session) as (eventType: string, eventData: unknown) => unknown
     append(type, data)
@@ -83,21 +90,21 @@ describe('durable workflow-record invariants', () => {
     }, /runId must be a non-empty string/],
     ['empty run id', (session) => {
       session.append('tool-workflow/agent-start', {
-        runId: WorkflowRunId(''), seq: 1, label: 'bad', childId: SessionId('child'),
+        runId: SupervisedWorkflowRunId(''), seq: 1, label: 'bad', childId: SessionId('child'),
       })
     }, /runId must be a non-empty string/],
     ['empty run name', (session) => {
-      session.append('tool-workflow/run-start', { runId: WorkflowRunId('empty-name'), name: '' })
+      session.append('tool-workflow/run-start', { runId: SupervisedWorkflowRunId('empty-name'), name: '' })
     }, /name must be a non-empty string/],
     ['non-string run name', (session) => {
-      session.append('tool-workflow/run-start', { runId: WorkflowRunId('bad-name'), name: 1 as never })
+      session.append('tool-workflow/run-start', { runId: SupervisedWorkflowRunId('bad-name'), name: 1 as never })
     }, /name must be a non-empty string/],
     ['duplicate run', (session, runId) => {
       session.append('tool-workflow/run-start', { runId, name: 'again' })
     }, /repeats run/],
     ['missing run', (session) => {
       session.append('tool-workflow/agent-start', {
-        runId: WorkflowRunId('missing'), seq: 1, label: 'bad', childId: SessionId('child'),
+        runId: SupervisedWorkflowRunId('missing'), seq: 1, label: 'bad', childId: SessionId('child'),
       })
     }, /no matching tool-workflow\/run-start/],
     ['non-positive member seq', (session, runId) => {
@@ -169,7 +176,7 @@ describe('durable workflow-record invariants', () => {
   it.each(invalidCases)('rejects %s', async (_name, mutate, pattern) => {
     const ctx = await setup()
     const session = ctx.sessions.create()
-    const runId = WorkflowRunId('run')
+    const runId = SupervisedWorkflowRunId('run')
     session.append('tool-workflow/run-start', { runId, name: 'run' })
     expect(() => { mutate(session, runId) }).toThrow(pattern)
   })
@@ -178,22 +185,22 @@ describe('durable workflow-record invariants', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const valid = ctx.sessions.create(SessionId('workflow-record-cold-valid'))
-    valid.append('tool-workflow/run-start', { runId: WorkflowRunId('valid'), name: 'valid' })
+    valid.append('tool-workflow/run-start', { runId: SupervisedWorkflowRunId('valid'), name: 'valid' })
     valid.append('tool-workflow/agent-start', {
-      runId: WorkflowRunId('valid'), seq: 1, label: 'open', childId: SessionId('child'),
+      runId: SupervisedWorkflowRunId('valid'), seq: 1, label: 'open', childId: SessionId('child'),
     })
     await ctx.plugin(InvariantRegistry, { enabled: true })
-    await expect(ctx.plugin(ToolWorkflowInvariant)).resolves.toBeDefined()
+    await expect(ctx.plugin(WorkflowRunRecorderInvariant)).resolves.toBeDefined()
 
     const brokenCtx = new Context()
     await brokenCtx.plugin(SessionStore)
     const broken = brokenCtx.sessions.create(SessionId('workflow-record-cold-invalid'))
-    broken.append('tool-workflow/run-start', { runId: WorkflowRunId('broken'), name: 'broken' })
-    broken.append('tool-workflow/run-end', { runId: WorkflowRunId('broken'), stopReason: 'completed' })
+    broken.append('tool-workflow/run-start', { runId: SupervisedWorkflowRunId('broken'), name: 'broken' })
+    broken.append('tool-workflow/run-end', { runId: SupervisedWorkflowRunId('broken'), stopReason: 'completed' })
     broken.append('tool-workflow/agent-start', {
-      runId: WorkflowRunId('broken'), seq: 1, label: 'late', childId: SessionId('late'),
+      runId: SupervisedWorkflowRunId('broken'), seq: 1, label: 'late', childId: SessionId('late'),
     })
     await brokenCtx.plugin(InvariantRegistry, { enabled: true })
-    await expect(brokenCtx.plugin(ToolWorkflowInvariant)).rejects.toThrow(/appears after/)
+    await expect(brokenCtx.plugin(WorkflowRunRecorderInvariant)).rejects.toThrow(/appears after/)
   })
 })

@@ -487,13 +487,18 @@ const SCENARIOS: Scenario[] = [
     systemPromptSource: 'text-turn',
     configPath: CHILD_QUESTION_CONFIG,
   },
-  // The workflow tool: the model writes a one-child orchestration script; the
-  // child runs as a spawn subagent under the worker-thread engine (its session is the
-  // child fixture), and the tool result carries the script's return value.
-  { name: 'workflow-run', hasModelTurn: true, recorded: true },
+  // The workflow tool returns a background-launch acknowledgement before its
+  // one child settles. The completion notice then wakes the idle parent for a
+  // second turn; the replay sidecar owns the parent responses.
+  {
+    name: 'workflow-run',
+    hasModelTurn: true,
+    recorded: false,
+    overridden: true,
+  },
   // Authored counterpart to the packaged Python SDK snapshot: define a host-half marker package and
-  // run it, inspect this session's dynamic packages through Code Mode, run direct and workflow
-  // children, then undefine it. The extra Code Mode and
+  // run it, inspect this session's dynamic packages through Code Mode, run a direct child, then
+  // undefine it. The extra Code Mode and
   // Cordis plugins require their own request-header pin; the fixture tests deterministic composition.
   {
     name: 'advanced-toolchain',
@@ -658,4 +663,61 @@ it('packed ACP fixture retains every chunk row kind without changing the logical
     ...records.slice(1).flatMap(record => decodeStorageRecord(record)).map(withoutMessageId),
   ]
   expect(logicalRecords(packed)).toStrictEqual(logicalRecords(source))
+})
+
+it('workflow fixture records one detached lifecycle and one waking completion notice', () => {
+  type FixtureRecord = {
+    type?: unknown
+    data?: {
+      runId?: unknown
+      turn?: unknown
+      message?: {
+        content?: Array<{ type?: unknown; text?: unknown }>
+      }
+      inserted?: Array<{
+        content?: Array<{ type?: unknown; text?: unknown }>
+        source?: { kind?: unknown; plugin?: unknown; form?: unknown }
+      }>
+    }
+  }
+  const records = fixtureRecords('workflow-run') as FixtureRecord[]
+  const indexes = (type: string): number[] => records.flatMap((record, index) =>
+    record.type === type ? [index] : [])
+  const starts = indexes('tool-workflow/run-start')
+  const ends = indexes('tool-workflow/run-end')
+  expect(starts).toHaveLength(1)
+  expect(ends).toHaveLength(1)
+  expect(records[starts[0] as number]?.data?.runId).toBe(records[ends[0] as number]?.data?.runId)
+
+  const launchResult = records.findIndex(record => record.type === 'tool/result'
+    && record.data?.message?.content?.some(block => block.type === 'tool-result'
+      && JSON.stringify(block).includes('\\"status\\":\\"started\\"')) === true)
+  expect(launchResult).toBeGreaterThan(starts[0] as number)
+  expect(launchResult).toBeLessThan(ends[0] as number)
+
+  const completionNotices = records.flatMap((record, index) => {
+    if (record.type !== 'agent/inbox/spliced') return []
+    return record.data?.inserted?.flatMap(message => message.source?.kind === 'plugin'
+      && message.source.plugin === 'workflow-supervisor'
+      && message.source.form === 'notice'
+      ? [{ index, text: message.content?.flatMap(block => block.type === 'text' && typeof block.text === 'string'
+        ? [block.text]
+        : []).join('') ?? '' }]
+      : []) ?? []
+  })
+  expect(completionNotices).toHaveLength(1)
+  expect(completionNotices[0]?.index).toBeGreaterThan(ends[0] as number)
+  expect(completionNotices[0]?.text).toMatch(/workflow "snapshot-flow" completed/i)
+
+  const assistantTexts = records.flatMap(record => record.type === 'assistant/message'
+    ? record.data?.message?.content?.flatMap(block => block.type === 'text' && typeof block.text === 'string'
+      ? [{ text: block.text, turn: record.data?.turn }]
+      : []) ?? []
+    : [])
+  expect(assistantTexts.filter(({ text }) => text === 'WORKFLOW_LAUNCHED')).toEqual([
+    { text: 'WORKFLOW_LAUNCHED', turn: 1 },
+  ])
+  expect(assistantTexts.filter(({ text }) => text === 'WORKFLOW_COMPLETION_ACK')).toEqual([
+    { text: 'WORKFLOW_COMPLETION_ACK', turn: 2 },
+  ])
 })

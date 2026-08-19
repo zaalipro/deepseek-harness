@@ -11,6 +11,7 @@ describe('jsonSchemaToPy', () => {
       [{ type: 'boolean' }, 'bool'],
       [{ type: 'string', enum: ['a', 'b'] }, 'Literal["a", "b"]'],
       [{ type: 'array', items: { type: 'number' } }, 'list[float]'],
+      [{ type: 'array', items: { type: 'number' }, minItems: 1, maxItems: 8 }, 'list[float]'],
       [{ type: 'array', items: { type: 'string', enum: ['x', 'y'] } }, 'list[Literal["x", "y"]]'],
       [{ type: 'array' }, 'list[Any]'],
       [{ type: 'object' }, 'dict[str, Any]'],

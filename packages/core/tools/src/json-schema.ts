@@ -2,8 +2,9 @@
  * Enforced JSON Schema subset shared by tool outputs, generated Code Mode
  * types, subagents, and workflows. The subset accepts any JSON root, an
  * annotation-only schema for unconstrained JSON, one scalar `type`, object
- * `properties`/`required`/boolean `additionalProperties`, array `items`,
- * type-correct scalar `enum`/`const`, and exact-one `oneOf`.
+ * `properties`/`required`/boolean `additionalProperties`, array
+ * `items`/`minItems`/`maxItems`, type-correct scalar `enum`/`const`, and
+ * exact-one `oneOf`.
  *
  * Unsupported or misplaced keywords reject rather than being accepted without
  * enforcement. Consumers that require an object root apply
@@ -41,6 +42,10 @@ export interface JsonSchemaNode {
   additionalProperties?: boolean
   /** Item schema (`type: 'array'` only); absent accepts any JSON item. */
   items?: JsonSchemaNode
+  /** Inclusive non-negative minimum array length (`type: 'array'` only); it cannot exceed `maxItems`. */
+  minItems?: number
+  /** Inclusive non-negative maximum array length (`type: 'array'` only); it cannot be below `minItems`. */
+  maxItems?: number
   /** Allowed values for a scalar node. */
   enum?: JsonSchemaScalar[]
   /** The single allowed value for a scalar node. */
@@ -80,6 +85,8 @@ const CONSTRAINT_KEYWORDS = new Set([
   'required',
   'additionalProperties',
   'items',
+  'minItems',
+  'maxItems',
   'enum',
   'const',
 ])
@@ -197,7 +204,36 @@ type SchemaWalkTask =
   | { kind: 'object-tail'; node: Record<string, unknown>; path: string; properties: unknown }
 
 /** Keywords that are invalid beside `oneOf`. */
-const ONE_OF_SIBLING_KEYWORDS = ['properties', 'required', 'additionalProperties', 'items', 'enum', 'const'] as const
+const ONE_OF_SIBLING_KEYWORDS = [
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'minItems',
+  'maxItems',
+  'enum',
+  'const',
+] as const
+
+/** Whether an array-length keyword is a lossless non-negative integer. */
+function isArrayLength(value: unknown): value is number {
+  return isJsonNumber(value) && Number.isInteger(value) && value >= 0
+}
+
+/** Validate array-only fields after its item schema has been scheduled. */
+function checkArraySchema(node: Record<string, unknown>, path: string, violations: string[]): void {
+  const hasMinItems = Object.hasOwn(node, 'minItems')
+  const hasMaxItems = Object.hasOwn(node, 'maxItems')
+  const minItems = hasMinItems ? node.minItems : undefined
+  const maxItems = hasMaxItems ? node.maxItems : undefined
+  const minItemsValid = isArrayLength(minItems)
+  const maxItemsValid = isArrayLength(maxItems)
+  if (hasMinItems && !minItemsValid) violations.push(`${path}.minItems must be a non-negative integer`)
+  if (hasMaxItems && !maxItemsValid) violations.push(`${path}.maxItems must be a non-negative integer`)
+  if (minItemsValid && maxItemsValid && minItems > maxItems) {
+    violations.push(`${path}.minItems must not exceed ${path}.maxItems`)
+  }
+}
 
 /** Validate object-only fields after its property schemas have been visited. */
 function checkObjectSchemaTail(
@@ -264,7 +300,7 @@ function checkSchemaNode(root: unknown, rootPath: string, violations: string[], 
         }
         continue
       }
-      violations.push(`${path}.${key} is not a supported keyword (subset: type/oneOf/properties/required/additionalProperties/items/enum/const + annotations)`)
+      violations.push(`${path}.${key} is not a supported keyword (subset: type/oneOf/properties/required/additionalProperties/items/minItems/maxItems/enum/const + annotations)`)
     }
     if (Object.hasOwn(node, 'description') && typeof node.description !== 'string') {
       violations.push(`${path}.description must be a string`)
@@ -312,6 +348,8 @@ function checkSchemaNode(root: unknown, rootPath: string, violations: string[], 
       required: ['object'],
       additionalProperties: ['object'],
       items: ['array'],
+      minItems: ['array'],
+      maxItems: ['array'],
       enum: ['string', 'number', 'integer', 'boolean', 'null'],
       const: ['string', 'number', 'integer', 'boolean', 'null'],
     }
@@ -341,6 +379,7 @@ function checkSchemaNode(root: unknown, rootPath: string, violations: string[], 
         break
       }
       case 'array': {
+        checkArraySchema(node, path, violations)
         if (Object.hasOwn(node, 'items')) tasks.push({ kind: 'enter', node: node.items, path: `${path}.items` })
         break
       }
@@ -421,6 +460,11 @@ function diagnosticPath(path: string): string {
 /** Append one object property without a leading dot at an implicit root. */
 function propertyPath(path: string, key: string): string {
   return path === '' ? key : `${path}.${key}`
+}
+
+/** Render one cardinality with a grammatically correct item label. */
+function itemCount(count: number): string {
+  return `${count} item${count === 1 ? '' : 's'}`
 }
 
 /** One child evaluation deferred by a container or exact-one union frame. */
@@ -590,6 +634,15 @@ function checkValue(schema: JsonSchemaNode, value: unknown, path: string): strin
             finish([`"${diagnosticPath(frame.path)}" must be an array`])
             break
           }
+          const violations: string[] = []
+          const minItems = Object.hasOwn(frame.node, 'minItems') ? frame.node.minItems : undefined
+          const maxItems = Object.hasOwn(frame.node, 'maxItems') ? frame.node.maxItems : undefined
+          if (minItems !== undefined && frame.value.length < minItems) {
+            violations.push(`"${diagnosticPath(frame.path)}" must contain at least ${itemCount(minItems)}`)
+          }
+          if (maxItems !== undefined && frame.value.length > maxItems) {
+            violations.push(`"${diagnosticPath(frame.path)}" must contain at most ${itemCount(maxItems)}`)
+          }
           const items = Object.hasOwn(frame.node, 'items') ? frame.node.items : undefined
           const children = items === undefined
             ? []
@@ -597,7 +650,7 @@ function checkValue(schema: JsonSchemaNode, value: unknown, path: string): strin
           frame.kind = 'array'
           frame.children = children
           frame.childIndex = 0
-          frame.violations = []
+          frame.violations = violations
           frame.phase = 'children'
           break
         }

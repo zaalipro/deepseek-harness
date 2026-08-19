@@ -30,6 +30,9 @@
       "path": "../../core/session"
     },
     {
+      "path": "../../workflow/workflow-supervisor"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     },
     {

@@ -6,12 +6,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { createReadStream } from 'node:fs'
+import { constants as fsConstants, createReadStream } from 'node:fs'
 import { chmod, link, lstat, mkdir, open, readFile, realpath, readdir, rename, rm, stat } from 'node:fs/promises'
 import type { BigIntStats, Dirent, Stats } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { TextDecoder } from 'node:util'
 import { FsError, FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
+import type { FsWriteIntent, FsWriteOutcome } from '@deepseek-ai/dsh-fs'
 import { copyFileDaclWin32, replaceFileWin32 } from './win32.ts'
 
 const BINARY_SAMPLE_BYTES = 8192
@@ -48,6 +49,10 @@ function errorMessage(error: unknown): string {
 
 function isPermissionError(error: unknown): boolean {
   return error instanceof Error && 'code' in error && (error.code === 'EACCES' || error.code === 'EPERM')
+}
+
+function isFinalSymlinkError(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ELOOP'
 }
 
 function throwIfAborted(signal: AbortSignal | undefined, verb: string): void {
@@ -100,6 +105,8 @@ export interface FsIoInternals {
   inspectTemp?: (paths: { stagingDir: string; tempPath: string }) => void | Promise<void>
   /** Test hook after raw-read stat preflight and before bounded content I/O. */
   inspectReadBytesAfterStat?: (target: LocalTarget) => void | Promise<void>
+  /** Test hook after a no-follow descriptor is validated and before it is read. */
+  inspectReadBytesNoFollowAfterOpen?: (path: string) => void | Promise<void>
 }
 
 /** A resolved local path: the absolute path shown to callers and its realpath identity. */
@@ -426,6 +433,187 @@ export async function readWholeBytes(
   return Buffer.concat(chunks, bytes)
 }
 
+function noFollowReadError(displayPath: string, error: unknown, signal: AbortSignal | undefined): FsError {
+  if (error instanceof FsError) return error
+  if (signal?.aborted || isAbortError(error)) {
+    return new FsError('read aborted', 'FS_ABORTED', { cause: error })
+  }
+  if (isENOENT(error) || isENOTDIR(error)) {
+    return new FsError(`cannot read "${displayPath}": not found`, 'FS_NOT_FOUND', { cause: error })
+  }
+  if (isFinalSymlinkError(error)) {
+    return new FsError(
+      `cannot read "${displayPath}": not a regular file or is a symbolic link`,
+      'FS_NOT_REGULAR_FILE',
+      { cause: error },
+    )
+  }
+  if (isPermissionError(error)) {
+    return new FsError(`cannot read "${displayPath}": permission denied`, 'FS_PERMISSION_DENIED', { cause: error })
+  }
+  return new FsError(`cannot read "${displayPath}": ${errorMessage(error)}`, 'FS_IO_ERROR', { cause: error })
+}
+
+function noFollowWriteError(displayPath: string, error: unknown, signal: AbortSignal | undefined): FsError {
+  if (error instanceof FsError) return error
+  if (signal?.aborted || isAbortError(error)) {
+    return new FsError('write aborted', 'FS_ABORTED', { cause: error })
+  }
+  if (isPermissionError(error)) {
+    return new FsError(`cannot write "${displayPath}": permission denied`, 'FS_PERMISSION_DENIED', { cause: error })
+  }
+  return new FsError(`cannot write "${displayPath}": ${errorMessage(error)}`, 'FS_IO_ERROR', { cause: error })
+}
+
+/**
+ * Open a path's final component without following it, validate the opened
+ * descriptor as a regular file, and read bounded bytes through that descriptor.
+ * Ancestor symbolic links retain normal platform resolution.
+ * @param cwd - base directory for a relative path.
+ * @param path - absolute or relative caller-supplied path.
+ * @param signal - aborts before open and between descriptor reads.
+ * @param maxBytes - inclusive byte cap on the complete content.
+ * @param internals - platform and post-open test seams.
+ * @returns the complete raw content from the opened file.
+ */
+export async function readPathBytesNoFollow(
+  cwd: string,
+  path: string,
+  signal: AbortSignal | undefined,
+  maxBytes: number,
+  internals: FsIoInternals = {},
+): Promise<Uint8Array> {
+  throwIfAborted(signal, 'read')
+  if (path.trim().length === 0) throw new FsError('file_path must be a non-empty string', 'FS_NOT_FOUND')
+  const displayPath = resolve(cwd, path)
+  const platform = internals.platform ?? process.platform
+  if (platform === 'win32' || typeof fsConstants.O_NOFOLLOW !== 'number' || fsConstants.O_NOFOLLOW === 0) {
+    throw new FsError(
+      `cannot read "${displayPath}": this filesystem provider cannot atomically refuse final symbolic links on ${platform}`,
+      'FS_IO_ERROR',
+    )
+  }
+
+  try {
+    const flags = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK
+    const handle = await open(displayPath, flags)
+    try {
+      throwIfAborted(signal, 'read')
+      const info = await handle.stat()
+      throwIfAborted(signal, 'read')
+      if (!info.isFile()) {
+        throw new FsError(`cannot read "${displayPath}": not a regular file`, 'FS_NOT_REGULAR_FILE')
+      }
+      if (info.size > maxBytes) {
+        throw new FsError(
+          `cannot read "${displayPath}": ${info.size} bytes exceeds the ${maxBytes}-byte limit`,
+          'FS_TOO_LARGE',
+        )
+      }
+      await internals.inspectReadBytesNoFollowAfterOpen?.(displayPath)
+      const chunks: Buffer[] = []
+      let total = 0
+      while (total <= maxBytes) {
+        throwIfAborted(signal, 'read')
+        const length = Math.min(DIFF_BASIS_READ_CHUNK_BYTES, maxBytes - total + 1)
+        const chunk = Buffer.allocUnsafe(length)
+        const { bytesRead } = await handle.read(chunk, 0, length, null)
+        throwIfAborted(signal, 'read')
+        if (bytesRead === 0) break
+        total += bytesRead
+        if (total > maxBytes) {
+          throw new FsError(
+            `cannot read "${displayPath}": content exceeds the ${maxBytes}-byte limit`,
+            'FS_TOO_LARGE',
+          )
+        }
+        chunks.push(chunk.subarray(0, bytesRead))
+      }
+      return Buffer.concat(chunks, total)
+    } finally {
+      await handle.close()
+    }
+  } catch (error: unknown) {
+    throw noFollowReadError(displayPath, error, signal)
+  }
+}
+
+/**
+ * Guard and atomically publish UTF-8 text at a lexical path without following
+ * its final symbolic-link component. POSIX rename replaces a raced destination
+ * link as a directory entry; guarded creation uses the no-replace hard-link
+ * publication. The prior file is not opened, so no presentation diff basis is
+ * returned.
+ * @param cwd - base directory for a relative path.
+ * @param path - absolute or relative caller-supplied path.
+ * @param content - complete UTF-8 text to publish.
+ * @param expected - required create/version publication guard.
+ * @param signal - aborts before publication.
+ * @param internals - platform and pre-publication test seams.
+ * @returns the atomic write outcome with no prior-content basis.
+ */
+export async function writePathTextNoFollow(
+  cwd: string,
+  path: string,
+  content: string,
+  expected: FsWriteIntent,
+  signal: AbortSignal | undefined,
+  internals: FsIoInternals = {},
+): Promise<FsWriteOutcome> {
+  throwIfAborted(signal, 'write')
+  if (path.trim().length === 0) throw new FsError('file_path must be a non-empty string', 'FS_NOT_FOUND')
+  const displayPath = resolve(cwd, path)
+  const platform = internals.platform ?? process.platform
+  if (platform === 'win32') {
+    throw new FsError(
+      `cannot write "${displayPath}": this filesystem provider cannot atomically guard a final path entry on ${platform}`,
+      'FS_IO_ERROR',
+    )
+  }
+
+  try {
+    const existing = await probeNoFollow(displayPath)
+    throwIfAborted(signal, 'write')
+    if (existing !== null && existing.type !== 'file') {
+      throw new FsError(`cannot write "${displayPath}": not a regular file or is a symbolic link`, 'FS_NOT_REGULAR_FILE')
+    }
+    if (expected.kind === 'replaceIfVersion') {
+      if (existing === null || existing.version !== expected.version) {
+        throw new FsError(`cannot write "${displayPath}": file changed since it was read`, 'FS_STALE_VERSION')
+      }
+    } else if (existing !== null) {
+      throw new FsError(
+        `cannot overwrite existing "${displayPath}" without reading it first`,
+        'FS_NOT_OBSERVED',
+      )
+    }
+
+    await writeFileAtomic(
+      displayPath,
+      content,
+      existing?.mode,
+      signal,
+      internals,
+      expected.kind === 'createIfAbsent' ? { displayPath } : undefined,
+      expected.kind === 'replaceIfVersion'
+        ? { displayPath, version: expected.version }
+        : undefined,
+    )
+    const after = await probeNoFollow(displayPath)
+    if (after === null || after.type !== 'file') {
+      throw new FsError(`cannot write "${displayPath}": published path is not a regular file`, 'FS_IO_ERROR')
+    }
+    return {
+      operation: existing === null ? 'create' : 'update',
+      version: after.version,
+      before: null,
+      after: normalizeLineEndings(content),
+    }
+  } catch (error: unknown) {
+    throw noFollowWriteError(displayPath, error, signal)
+  }
+}
+
 /**
  * Stream a whole regular UTF-8 text file as decoded text chunks. Same text
  * semantics as {@link readWholeText} (regular-file check, binary/NUL rejection,
@@ -529,6 +717,8 @@ async function throwGuardedCreateFailure(
  * @param createIfAbsent - when provided, publish with a hard-link no-replace
  * primitive; a concurrent creator's file is preserved and this write is
  * rejected with `FS_NOT_OBSERVED` using the supplied display path.
+ * @param replaceIfVersion - when provided, revalidate the no-follow destination
+ * immediately before rename; a missing, replaced, or linked entry is rejected.
  */
 export async function writeFileAtomic(
   absolutePath: string,
@@ -537,6 +727,7 @@ export async function writeFileAtomic(
   signal: AbortSignal | undefined,
   internals: FsIoInternals = {},
   createIfAbsent?: { displayPath: string },
+  replaceIfVersion?: { displayPath: string; version: FsVersion },
 ): Promise<void> {
   throwIfAborted(signal, 'write')
   const directory = dirname(absolutePath)
@@ -581,6 +772,33 @@ export async function writeFileAtomic(
       } catch (error: unknown) {
         await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
       }
+    } else if (replaceIfVersion !== undefined) {
+      let publicationTarget: BigIntStats
+      try {
+        publicationTarget = await lstat(absolutePath, { bigint: true })
+      } catch (error: unknown) {
+        if (isENOENT(error) || isENOTDIR(error)) {
+          throw new FsError(
+            `cannot write "${replaceIfVersion.displayPath}": file changed since it was read`,
+            'FS_STALE_VERSION',
+            { cause: error },
+          )
+        }
+        throw error
+      }
+      if (!publicationTarget.isFile() || publicationTarget.isSymbolicLink()) {
+        throw new FsError(
+          `cannot write "${replaceIfVersion.displayPath}": not a regular file or is a symbolic link`,
+          'FS_NOT_REGULAR_FILE',
+        )
+      }
+      if (versionOf(publicationTarget) !== replaceIfVersion.version) {
+        throw new FsError(
+          `cannot write "${replaceIfVersion.displayPath}": file changed since it was read`,
+          'FS_STALE_VERSION',
+        )
+      }
+      await rename(tempPath, absolutePath)
     } else if (platform === 'win32' && mode !== undefined) {
       try {
         await replaceFile(absolutePath, tempPath)

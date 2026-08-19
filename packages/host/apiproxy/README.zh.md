@@ -64,6 +64,8 @@ Workspace 列表与 Session 列表是相互独立的重连基线。`workspace.cr
 
 `AbstractApiClient` 持有全部协议不变量：签发 rpcId、包装／解包信封、Zod 解析、SSE 帧解码、一元请求超时，以及按微任务批处理的信封观测（`subscribeEnvelopes`）；平台子类只提供 `doFetch` 传输环节。`InProcessApiClient` 以 `toFetchHandler(api)` 为基础，仍是同构接点：它运行完整的协议序列化与校验路径而不经过网络，供需要该路径的调用方和载体测试使用。产品的 `dsh --profile headless` 是直连 core 的入口，不挂载本包。
 
+宿主流会按 Session 将 `workflows/run-change` 作为只保留最新值的通道转发，普通帧仍保持 FIFO。`workflowChangeQueueMaxSessions` 限制每个读取方尚未读取的不同 Session 键数量（默认 64）；超过上限时，工作流通道会被替换为一个全局失效通知，客户端据此重新读取有界 Remote 分页，而不会累积运行快照。
+
 ## 模型体验
 
 无。该包定义客户端与宿主间的 wire 约定和载体，其中没有任何内容会进入模型请求。

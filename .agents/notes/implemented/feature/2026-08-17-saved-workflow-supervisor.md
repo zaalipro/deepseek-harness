@@ -6,52 +6,56 @@ English | [中文](2026-08-17-saved-workflow-supervisor.zh.md)
 
 ## Problem
 
-The dynamic-workflow seam launched a model-written script inline and blocked the parent turn until it settled. Three Grok-build-shaped capabilities stayed deferred: saved workflow definitions on disk, human slash-command entry, and a background run lifecycle with a live roster, display-name handles, pause/resume, and stop/save. The Web Chat renderer (`ui-workflow-run`) showed durable top-level run history but no controls, and nothing outside an agent read a workflow run — so the engine lived in a preset-scoped realm.
+The dynamic-workflow seam provided holder-owned script execution, but the ordinary tool collected each run in the launching turn. Definitions could not be shared as files, humans had no command entry, and the browser had no bounded control and inspection API for background work. A useful detached lifecycle also had to distinguish one logical run from its engine attempts, survive process restart as inspectable history without claiming that execution resumed, and deliver completion to the exact launching Agent without creating an unbounded sequence of model turns.
 
 ## Decision
 
-Saved workflows, slash commands, and run supervision became three host-plane additions plus a widened engine, mounted in the Web composition.
+Saved definitions, a session-owned supervisor, Host launch commands, and a browser-owned dashboard form one workflow product path in the Web composition.
 
-### Saved definitions (`dsh-workflow-registry`)
+### Saved definitions
 
-A definition is one JSON envelope `<name>.workflow.json` with `{ meta, script }`: meta is validated as data beside the body (never evaluated), the filename must equal `meta.name` (kebab-case), and unknown meta fields fail loud. Discovery scans three roots in precedence order — bundled > project (`.dsh/workflows`) > user (`<dshHome>/workflows`) — keyed by `meta.name`, with a chokidar watcher invalidating the catalog and emitting `workflows/change`. `ctx.workflows` serves sorted summaries and full definitions; a malformed file fails discovery loud with its path and reason.
+`dsh-workflow-registry` discovers `<name>.workflow.json` envelopes containing `{ meta, script }` from bundled, project (`.dsh/workflows`), and user (`<dshHome>/workflows`) roots with bundled > project > user precedence. Metadata is validated as data, the filename must match the kebab-case `meta.name`, and unknown fields or malformed definitions fail with the owning path. The registry re-reads on each lookup; its watcher emits `workflows/change` as a refresh hint rather than as the sole source of freshness. Project and user saves use the filesystem capability with link refusal and concurrent-publication guards.
 
-### Run supervisor (`dsh-workflow-supervisor`)
+### Logical runs and engine attempts
 
-`ctx.workflowSupervisor` owns every live `WorkflowRun` handle, so a launch returns immediately. Runs key by a session-unique display name — `meta.name` for the first live/retained run, then `meta.name-2`, `meta.name-3` — never by internal id; numbered handles are for humans, not definition names. A launch writes an editable `script.js` projection plus a `scratch/` directory under `<dshHome>/workflow-runs/<dir-id>`. Child-agent results are journaled in call order from the new `workflow/agent-result` event, project-scoped: `workflow/start|phase|log|gate|agent-start|agent-end|agent-result|end` are the observe-only wire the supervisor folds into a live roster view, pushed to the browser as whole-set `session/workflow-runs` frames (the `session/jobs` posture).
+`dsh-workflow-supervisor` owns each accepted live `WorkflowRun`, so `start()` returns after durable publication with a stable logical `runId`, a session-unique display handle, and the editable script path. The logical id spans pause, gate, and budget-resume attempts; each engine attempt retains its separate engine run id. Member sequences and cumulative `agentsStarted` continue across attempts. `WorkflowJournalEntry.ordinal` records one gap-free commit-publication order across attempts, while stable call identity and its request fingerprint determine replay correspondence instead of launching the same child again.
 
-### Pause / resume / stop / save
+The first retained run for a workflow name uses that name as its display handle; later runs use monotonic numbered handles. A run directory contains a private `script.js` projection and `scratch/`. `pause` cancels and disposes the current attempt before parking the logical run with its journal. `await_user()` keeps the current worker parked and continues after its attempt-fenced question is acknowledged, while `pause()` re-fires its condition after resume. A budget-limited run resumes only when the caller supplies a higher absolute budget; an ordinary paused or needs-input run rejects a changed budget. `stop` publishes one terminal cancellation. `save` reads the bounded editable projection through the definition registry and rejects bundled or numbered runs.
 
-- `pause` cancels the run and marks it `paused`, retaining the committed journal. `resume` re-executes the original immutable script, args, and budget with the journal replayed (replayed `agent()` calls return committed results and spend no budget).
-- A script-level `await_user(kind, message)` parks the alive worker and resume continues past it; `pause(kind, message)` re-fires on every resume. Gates surface as `Needs input`.
-- `stop` cancels and marks `cancelled`; a process exit marks active runs `interrupted`, not resumable.
-- `save` writes the run's script projection back into project/user definitions; it refuses built-ins and numbered handles.
-- Completion injects a parent-visible notice with the result through `agent.inject`, so the report is not buried in the dashboard.
+### Retained manifests and bounded Remote reads
 
-### Slash commands (`dsh-command-workflows`)
+Each Session has a bounded manifest roster containing display-name ordinals, run heads, budget and member summaries, a log tail, gate presentation, a bounded result projection, and scratch-artifact metadata. Recovery commits every formerly active row as terminal `interrupted` before returning it. It restores inspection state but no `Agent`, engine attempt, script, args, journal, or resume authority; a recovered row therefore has no editable `scriptPath` and cannot be saved. Retention eviction removes the matching in-memory terminal row and run directory, so recovery and the live roster cannot produce duplicate rows.
 
-Host-plane `/workflow` (launch + `pause|resume|stop|save` grammar), `/workflows` (bare success; the client opens the dashboard on `command/executed`), `/create-workflow` (steers the model into the bundled `create-workflow` skill), and one launch command per saved `meta.name`, refreshed on `workflows/change` and silently yielding the bare name to built-in collisions. No internal id ever reaches command text.
+The Typert `workflowRuns` Remote is the browser authority. `list` returns a bounded page with a process epoch and per-Session revision; `detail`, `members`, `memberDetail`, `logs`, `result`, `artifacts`, and `artifact` load selected data on demand; `control` applies Pause, Resume, Stop, or Save with an optional expected-run-revision check. Opaque cursors bind to one collection revision and fail when stale. List rows contain bounded counts, collection revisions, and `allowedActions`, never complete members or output. Script-visible member outcomes and final values distinguish `pending`, `available`, `not-produced`, and `evicted`; scratch files are read as paged UTF-8 chunks.
 
-### Engine widening (`dsh-workflow-worker-thread`)
+`workflows/run-change` carries one `upsert` or `remove`, a per-Session `invalidate`, or `invalidate-all` when the carrier drops queued Session changes. Every addressed change carries the epoch and next Session revision, so clients refetch on a gap or epoch mismatch rather than merging uncertain state.
 
-The script surface gained `complete(value)`, `pause`/`await_user`, `budget()`, `write_scratch_file`/`read_scratch_file`, a `parallel([...job maps])` overload, journal replay, and `validate_only` (canned `agent()` results, no children, no record). The engine moved to the host plane because the supervisor and commands read it from outside any agent's realm.
+### Completion delivery and quiescence
 
-### Web dashboard (`dsh-client-ui-workflows`)
+One terminal publication produces at most one UTF-8-bounded notice for the exact launching Agent object. Runs reserved before delivery join one completion cohort. Below the consecutive completion-wake limit, the first delivered notice in each cohort uses `followup` regardless of the owner's current status, while the remaining cohort notices use `inject`; later cohorts may open more turns until the limit. Only claimed human input resets the owner's wake count. The notice retains the dashboard recovery direction and, when present, the conventional `scratch/report.md` reference inside the byte limit.
 
-A fullscreen `shell.overlay` entry reads `workflowRunsBySession` from the runtime mirror; Pause/Resume/Stop/Save execute the `/workflow` command through the commands Remote. The in-chat `workflow-run` node remains the durable surface; the dashboard is additional.
+`whenOwnerQuiescent()` reaches a fixed point over reserved starts, running attempts, durable terminal publication, completion delivery, and turns woken by completion. Human gates, user pauses, and budget-limited runs are parked and therefore quiescent. This lets one-shot compositions wait for owned background work without treating a parked run as active execution.
+
+### Commands, durable Chat, and the dashboard
+
+`dsh-command-workflows` owns `/workflow`, `/create-workflow`, and cwd-scoped saved-definition aliases. An existing command keeps a colliding bare name; the workflow alias repeats the `workflow-` qualifier until free, while every definition reserves its own bare name and `/workflow <name>` remains canonical. Alias reconciliation follows definition and command-registry changes. `/create-workflow` enters the deterministic bundled authoring skill through the standard user-explicit skill path. `/workflows` is a browser-owned client action: opening the overlay performs no Host command execution and appends no command lifecycle row.
+
+`dsh-workflow-run-recorder` wraps exactly one explicitly attributed supervisor launch for each human launch command or root `workflow` tool call and projects one durable Chat lifecycle under the stable logical run id. Nested, internal, and unattributed launches remain dashboard-only. Member events from every engine attempt join that record, while a pause, input gate, or budget stop does not close it. The browser's `WorkflowRunsController` lazily subscribes to the selected Session, applies revisioned bounded heads, refetches gaps, and leaves details and outputs on demand. Dashboard controls call the typed Remote directly. Child transcript links refresh the direct-child catalog and open only an exact healthy one-shot child, whether that child is still running or already settled.
 
 ## Verification
 
-Package tests cover envelope parsing and discovery precedence, the supervisor display-name allocator, journal re-run, save rejection, interrupted-on-exit, and the `/workflow` grammar. Worker-thread tests cover every new hook through the in-process MessageChannel (complete, budget, gates, journal replay, parallel maps, scratch, validate_only). The browser smoke covers the assembled slash menu, a background launch, the dashboard roster, and a pause/resume cycle.
+Package coverage pins manifest decoding and retention, recovery-to-interrupted state, duplicate-row eviction, stable logical identity across attempts, cumulative budget and journal replay, stale controls and cursors, paged value and artifact reads, gate fencing, exact-owner completion delivery, wake limits, owner quiescence, explicit command and tool attribution, and restart reconciliation of orphan Chat records. Runtime tests pin baseline/change ordering, epoch and revision gaps, reconnect and removal fencing, and on-demand operations. The assembled workflow replay pins background launch, the later completion turn, and the durable logical lifecycle; the Web smoke pins the client-owned `/workflows` action and real dashboard controls.
 
 ## Alternatives considered
 
-**A projection-key dashboard over session-projections.** Rejected: run state is process-local, rich, and changes many times per run; the whole-set `session/workflow-runs` frame mirrors `session/jobs` exactly and keeps the dashboard a read-only projection of the supervisor.
+**Whole-set `session/workflow-runs` frames.** Rejected because complete rosters and outputs grow with retained history and force every change through one eager mirror. Bounded heads plus revisioned invalidation keep the forwarded event small and make expensive collections explicit reads.
 
-**Per-preset supervisor with host-plane commands.** Rejected: the api-proxy could not read a preset-realm supervisor to push frames, and commands could not resolve the run registry.
+**Host execution for `/workflows` and dashboard controls.** Rejected because opening a browser view is not a Host command, and controls already have an authorized, revision-checked Remote. Browser ownership avoids false command transcript rows and a second parser for the same actions.
 
-**Keeping foreground tool semantics and bolting a poll on top.** Rejected: the supervisor owning the live run is what makes background launch, cancellation, and the completion notice correct without a second lifecycle owner.
+**Restoring active execution from manifests.** Rejected because a durable view does not contain the live Agent, engine resources, immutable inputs, or committed replay journal needed to continue correctly. Recovery reports interruption and preserves inspection rather than manufacturing resume authority.
+
+**Completion by Session id or an unrestricted follow-up.** Rejected because a replacement Agent must not inherit another instance's completion, and repeated completion cohorts could recursively spend turns. Exact-object routing plus one wake per cohort and a consecutive wake cap preserves delivery without an unbounded loop.
 
 ## Consequences
 
-Workflow runs now survive as background, pauseable, resumable, stoppable work with a live dashboard, while the durable `tool-workflow/*` Chat record and the generic tool card stay unchanged. Definitions are ordinary files a team can share in git. Journal replay is never exactly-once for external effects whose result was not committed before pause; effectful steps must stay idempotent, and cross-process resume is deliberately unsupported (active runs become `Interrupted`).
+Workflows are background, inspectable, controllable logical runs with shareable definitions and durable retained views. The cost is explicit revision, retention, and recovery machinery plus separate logical and attempt identities. Journal replay is not exactly-once for an external effect whose result was not committed before cancellation, so effectful workflow steps remain idempotent. Process restart preserves bounded inspection and marks active work Interrupted; it does not support cross-process resume or saving a recovered script projection.

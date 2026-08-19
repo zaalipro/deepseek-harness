@@ -1,6 +1,7 @@
 /**
  * Host-filesystem implementation of `ctx.fs`. Realpath-derived target identity makes aliases
- * share stale guards, and writes through a symlink update its target without replacing the link.
+ * share stale guards, and target-shaped writes through a symlink update its target without
+ * replacing the link. Path-shaped no-follow operations keep the final entry lexical.
  * @module @deepseek-ai/dsh-fs-local
  */
 
@@ -27,6 +28,7 @@ import {
   probe,
   probeNoFollow,
   readForEdit,
+  readPathBytesNoFollow,
   readTextForDiff,
   readWholeBytes,
   readWholeText,
@@ -34,6 +36,7 @@ import {
   restoreLineEndings,
   streamWholeText,
   writeFileAtomic,
+  writePathTextNoFollow,
 } from './fsio.ts'
 import type { FsIoInternals } from './fsio.ts'
 
@@ -150,6 +153,50 @@ export class LocalFileSystem extends FileSystem {
 
   override async readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array> {
     return readWholeBytes({ displayPath: target.displayPath, targetKey: target.targetKey }, signal, maxBytes, this.internals)
+  }
+
+  /**
+   * Open, validate, and bound a POSIX final-component no-follow descriptor.
+   * @param path - path to read; relative paths resolve against `opts.cwd`.
+   * @param opts - optional base directory for a relative path.
+   * @param signal - aborts before open and between descriptor reads.
+   * @param maxBytes - inclusive complete-content byte cap.
+   * @returns bytes read through the validated descriptor.
+   */
+  override async readBytesNoFollow(
+    path: string,
+    opts: { cwd?: string },
+    signal: AbortSignal | undefined,
+    maxBytes: number,
+  ): Promise<Uint8Array> {
+    return readPathBytesNoFollow(opts.cwd ?? this.config.cwd, path, signal, maxBytes, this.internals)
+  }
+
+  /**
+   * Publish guarded UTF-8 text without following the final POSIX path entry.
+   * @param path - destination path; relative paths resolve against `opts.cwd`.
+   * @param opts - optional base directory for a relative path.
+   * @param content - complete UTF-8 text to publish.
+   * @param expected - required create or version guard.
+   * @param signal - aborts before publication.
+   * @returns the guarded publication outcome.
+   */
+  override async writeTextNoFollow(
+    path: string,
+    opts: { cwd?: string },
+    content: string,
+    expected: FsWriteIntent,
+    signal?: AbortSignal,
+  ): Promise<FsWriteOutcome> {
+    const lockKey = `path-no-follow:${resolve(opts.cwd ?? this.config.cwd, path)}`
+    return this.withLock(lockKey, () => writePathTextNoFollow(
+      opts.cwd ?? this.config.cwd,
+      path,
+      content,
+      expected,
+      signal,
+      this.internals,
+    ))
   }
 
   override async listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]> {

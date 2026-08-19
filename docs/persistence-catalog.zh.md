@@ -826,12 +826,12 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 ```ts persistence-catalog
 /**
  * Records one member settlement.
- * @param data - run identity, paired member sequence, and outcome.
+ * @param data - logical run identity, paired member sequence, and terminal outcome.
  */
-'tool-workflow/agent-end': ToolWorkflowAgentEndData
+'tool-workflow/agent-end': WorkflowRunRecordAgentEndData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/workflow-run-recorder/src/types.ts:65`](../packages/workflow/workflow-run-recorder/src/types.ts)
 
 <a id="tool-workflowagent-start--log-only"></a>
 
@@ -840,12 +840,12 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 ```ts persistence-catalog
 /**
  * Records one published workflow member.
- * @param data - run identity, member sequence, display identity, and child Session.
+ * @param data - logical run identity, member sequence, display identity, and child Session.
  */
-'tool-workflow/agent-start': ToolWorkflowAgentStartData
+'tool-workflow/agent-start': WorkflowRunRecordAgentStartData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/workflow-run-recorder/src/types.ts:60`](../packages/workflow/workflow-run-recorder/src/types.ts)
 
 <a id="tool-workflowrun-end--log-only"></a>
 
@@ -856,10 +856,10 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
  * Closes one workflow record after cleanup.
  * @param data - stable run identity and terminal reason.
  */
-'tool-workflow/run-end': ToolWorkflowRunEndData
+'tool-workflow/run-end': WorkflowRunRecordEndData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/workflow-run-recorder/src/types.ts:70`](../packages/workflow/workflow-run-recorder/src/types.ts)
 
 <a id="tool-workflowrun-start--log-only"></a>
 
@@ -870,10 +870,10 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
  * Opens one top-level workflow record.
  * @param data - stable run identity and display name.
  */
-'tool-workflow/run-start': ToolWorkflowRunStartData
+'tool-workflow/run-start': WorkflowRunRecordStartData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:47`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/workflow-run-recorder/src/types.ts:55`](../packages/workflow/workflow-run-recorder/src/types.ts)
 
 ### `turn/*`
 

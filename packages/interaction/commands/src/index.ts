@@ -70,20 +70,23 @@ interface RegisteredCommand {
 /** All command registrations owned by one global or scoped layer. */
 class CommandLayer implements ScopeLayer {
   readonly commands: NamedEntries<RegisteredCommand>
+  readonly fallbacks: NamedEntries<RegisteredCommand>
 
   /**
    * Create one command layer with diagnostics specific to its ownership scope.
    * @param scope - the scoped owner, or `undefined` for global registrations.
    */
   constructor(scope: ScopeKey | undefined) {
-    this.commands = new NamedEntries(name => new Error(scope === undefined
+    const duplicate = (name: string): Error => new Error(scope === undefined
       ? `command "${name}" is already registered (for a per-agent variant, mount a command-injected plugin under that agent's \`agent.ctx\`)`
-      : `command "${name}" is already registered in this scope`))
+      : `command "${name}" is already registered in this scope`)
+    this.commands = new NamedEntries(duplicate)
+    this.fallbacks = new NamedEntries(name => new Error(`fallback command "${name}" is already registered in this scope`))
   }
 
   /** @returns whether this layer owns no command registrations. */
   isEmpty(): boolean {
-    return this.commands.isEmpty()
+    return this.commands.isEmpty() && this.fallbacks.isEmpty()
   }
 }
 
@@ -252,6 +255,22 @@ export class CommandRuntime extends TypertRemoteService {
   }
 
   /**
+   * Register a lowest-priority command used only when no ordinary global or
+   * scoped definition owns the name. This supports dynamic aliases that must
+   * yield continuously as built-in plugins mount and unmount.
+   * @param definition - discovery metadata and direct UI handler.
+   * @returns the exact effect disposer that unregisters this fallback.
+   */
+  registerFallback(definition: CommandDefinition): () => void {
+    const registered = normalizeDefinition(definition)
+    return this.layers.effect(
+      this.ctx,
+      layer => layer.fallbacks.insert(registered.definition.name, registered),
+      { label: 'commands.registerFallback()' },
+    )
+  }
+
+  /**
    * List the effective immutable command descriptors for one agent.
    * @param agent - exact receiving agent and scoped-layer key.
    * @returns name-sorted descriptors after scoped shadowing.
@@ -363,7 +382,12 @@ export class CommandRuntime extends TypertRemoteService {
 
   /** Resolve global definitions followed by exact scoped shadows. */
   private view(agent: Agent): Map<string, RegisteredCommand> {
-    return this.layers.merge(agent, layer => layer.commands)
+    const merged = this.layers.merge(agent, layer => layer.fallbacks)
+    for (const [name, command] of this.layers.global.commands.entries()) merged.set(name, command)
+    for (const layer of this.layers.chainLayers(agent)) {
+      for (const [name, command] of layer.commands.entries()) merged.set(name, command)
+    }
+    return merged
   }
 
   /** Notify every registry observer without making UI refresh load-bearing. */

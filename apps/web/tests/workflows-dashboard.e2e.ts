@@ -46,9 +46,10 @@ describe('keyless web: workflow dashboard path', () => {
       setup: agentCtx => ctx.agentPresets.mount(agentCtx).then(() => undefined),
     })
     try {
-      // Slash discovery: the built-in workflow commands are always present.
+      // Host slash discovery includes launch and authoring. The browser owns
+      // /workflows so opening the dashboard never appends a command row.
       expect(ctx.commands.list(handle.agent).map(d => d.name)).toEqual(
-        expect.arrayContaining(['workflow', 'workflows', 'create-workflow']),
+        expect.arrayContaining(['workflow', 'create-workflow']),
       )
 
       // Background launch: the command returns immediately with the display name.
@@ -58,19 +59,19 @@ describe('keyless web: workflow dashboard path', () => {
       expect(first?.result.text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)
 
       // The completed run reaches the retained roster the dashboard reads.
-      await vi.waitFor(() => {
-        const runs = ctx.workflowSupervisor.listRuns(handle.agent)
+      await vi.waitFor(async () => {
+        const runs = (await ctx.workflowSupervisor.listForClient(handle.agent, {}, AbortSignal.timeout(10_000))).items
         expect(runs).toHaveLength(1)
-        expect(runs[0]).toMatchObject({ displayName: 'smoke', name: 'smoke', status: 'completed', numberedHandle: false })
+        expect(runs[0]).toMatchObject({ displayName: 'smoke', name: 'smoke', status: 'completed' })
       })
 
       // Launching the same definition again numbers the handle.
       await ctx.commands.execute(handle.agent, '/workflow smoke', AbortSignal.timeout(10_000))
-      await vi.waitFor(() => {
-        const runs = ctx.workflowSupervisor.listRuns(handle.agent)
+      await vi.waitFor(async () => {
+        const runs = (await ctx.workflowSupervisor.listForClient(handle.agent, {}, AbortSignal.timeout(10_000))).items
         expect(runs).toHaveLength(2)
         expect(runs.map(run => run.displayName)).toEqual(expect.arrayContaining(['smoke', 'smoke-2']))
-        expect(runs.find(run => run.displayName === 'smoke-2')).toMatchObject({ numberedHandle: true })
+        expect(runs.find(run => run.displayName === 'smoke-2')).toMatchObject({ name: 'smoke' })
       })
     } finally {
       await handle.dispose()
@@ -90,19 +91,29 @@ describe('keyless web: workflow dashboard path', () => {
       await ctx.commands.execute(handle.agent, '/workflow gated', AbortSignal.timeout(10_000))
 
       // The script parks on await_user → Needs input.
-      await vi.waitFor(() => {
-        const run = ctx.workflowSupervisor.listRuns(handle.agent)[0]
+      await vi.waitFor(async () => {
+        const run = (await ctx.workflowSupervisor.listForClient(handle.agent, {}, AbortSignal.timeout(10_000))).items[0]
         expect(run?.status).toBe('needs-input')
-        expect(run?.gate).toMatchObject({ resumable: true, kind: 'verification' })
+        if (run === undefined) throw new Error('gated run is missing')
+        const detail = await ctx.workflowSupervisor.detailForClient(
+          handle.agent, { runId: run.runId }, AbortSignal.timeout(10_000),
+        )
+        expect(detail.gate).toMatchObject({ resumable: true, kind: 'verification' })
       })
 
       // Resume continues past the gate and the run completes.
       const resume = await ctx.commands.execute(handle.agent, '/workflow resume gated', AbortSignal.timeout(10_000))
       expect(resume?.result.kind).toBe('success')
-      await vi.waitFor(() => {
-        const run = ctx.workflowSupervisor.listRuns(handle.agent)[0]
+      await vi.waitFor(async () => {
+        const run = (await ctx.workflowSupervisor.listForClient(handle.agent, {}, AbortSignal.timeout(10_000))).items[0]
         expect(run?.status).toBe('completed')
-        expect(run?.result).toEqual({ advanced: true })
+        if (run === undefined) throw new Error('gated run is missing')
+        const result = await ctx.workflowSupervisor.resultForClient(
+          handle.agent, { runId: run.runId }, AbortSignal.timeout(10_000),
+        )
+        expect(result.value).toMatchObject({
+          state: 'available', content: { kind: 'value', value: { advanced: true } },
+        })
       })
     } finally {
       await handle.dispose()
@@ -121,8 +132,8 @@ describe('keyless web: workflow dashboard path', () => {
     try {
       await ctx.commands.execute(handle.agent, '/workflow dedupe', AbortSignal.timeout(10_000))
       await ctx.commands.execute(handle.agent, '/workflow dedupe', AbortSignal.timeout(10_000))
-      await vi.waitFor(() => {
-        expect(ctx.workflowSupervisor.listRuns(handle.agent)).toHaveLength(2)
+      await vi.waitFor(async () => {
+        expect((await ctx.workflowSupervisor.listForClient(handle.agent, {}, AbortSignal.timeout(10_000))).items).toHaveLength(2)
       })
       const save = await ctx.commands.execute(handle.agent, '/workflow save dedupe-2', AbortSignal.timeout(10_000))
       expect(save?.result.kind).toBe('error')

@@ -5,6 +5,7 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
+import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import type {
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
@@ -12,11 +13,17 @@ import type {
   WorkflowResultInfo,
   WorkflowRunInfo,
 } from './types.ts'
-import type { WorkflowRun, WorkflowStartRequest } from './runtime-types.ts'
+import type { WorkflowJournalEntry, WorkflowRun, WorkflowStartRequest } from './runtime-types.ts'
 
 export { WorkflowError, isFatalWorkflowError } from './error.ts'
 export type { WorkflowErrorCode } from './error.ts'
-export { validateMeta } from './meta.ts'
+export {
+  isWorkflowDisplayName,
+  isWorkflowName,
+  validateMeta,
+  WORKFLOW_DISPLAY_NAME_MAX_LENGTH,
+  WORKFLOW_NAME_MAX_LENGTH,
+} from './meta.ts'
 export { WorkflowRunId } from './types.ts'
 export type {
   WorkflowAgentEndInfo,
@@ -92,15 +99,15 @@ declare module '@deepseek-ai/cordis' {
      */
     'workflow/agent-end'(info: WorkflowRunInfo, agent: WorkflowAgentEndInfo): void
     /**
-     * One committed `agent()` result, in call order — the journal a same-process
-     * resume replays instead of relaunching the child. Emitted only for live
-     * calls (journal-replayed calls emit nothing).
+     * One host call appended to the logical journal in consecutive
+     * commit-publication order. A same-process resume matches the stable call
+     * identity and replays the entry instead of repeating its result or effect.
+     * Replayed calls emit nothing.
      * @param info - the run's identity snapshot.
-     * @param seq - the 1-based agent() call sequence the result commits to.
-     * @param result - the script-visible result (text, structured object, or `null`).
+     * @param entry - committed call identity, fingerprint, kind, and optional result.
      * @mode emit
      */
-    'workflow/agent-result'(info: WorkflowRunInfo, seq: number, result: unknown): void
+    'workflow/journal-commit'(info: WorkflowRunInfo, entry: WorkflowJournalEntry): void
     /**
      * A workflow run settled (any stop reason). Fired when
      * {@link WorkflowRun.result} resolves. Paired with
@@ -122,7 +129,7 @@ export type WorkflowEventName =
   | 'workflow/gate'
   | 'workflow/agent-start'
   | 'workflow/agent-end'
-  | 'workflow/agent-result'
+  | 'workflow/journal-commit'
   | 'workflow/end'
 
 /**
@@ -151,9 +158,20 @@ export abstract class WorkflowEngine extends Service {
    * @param args - the event's payload, matching its declared signature.
    */
   protected emitWorkflowEvent(name: WorkflowEventName, ...args: unknown[]): void {
-    for (const callback of this.ctx.events.dispatch('emit', [name, ...args])) {
+    const dispatchArgs = snapshotJsonValue(args)
+    if (dispatchArgs === undefined) {
+      this.ctx.logger.warn(`workflow: ${name} payload is not losslessly JSON-serializable`)
+      return
+    }
+    for (const callback of this.ctx.events.dispatch('emit', [name, ...dispatchArgs])) {
       try {
-        const returned: unknown = (callback as (...payload: unknown[]) => unknown)(...args)
+        // One listener cannot mutate the event another listener or the run's
+        // holder observes. dispatchArgs itself stays private to Cordis's
+        // internal dispatch notification.
+        const payload = snapshotJsonValue(dispatchArgs)
+        /* v8 ignore next -- dispatchArgs was already accepted as a JSON array above */
+        if (!Array.isArray(payload)) throw new TypeError('workflow event snapshot must remain an array')
+        const returned: unknown = (callback as (...payload: unknown[]) => unknown)(...payload)
         void Promise.resolve(returned).catch((error: unknown) => {
           this.ctx.logger.warn(`workflow: ${name} listener rejected: ${renderListenerError(error)}`)
         })

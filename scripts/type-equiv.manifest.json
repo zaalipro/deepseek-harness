@@ -1372,6 +1372,41 @@
     },
     {
       "doc": "docs/subsystems/workflow.md",
+      "symbol": "WorkflowJournalEntry",
+      "source": "packages/workflow/workflow/src/runtime-types.ts"
+    },
+    {
+      "doc": "docs/subsystems/workflow.md",
+      "symbol": "WorkflowRunRecordingSnapshot",
+      "source": "packages/workflow/workflow-supervisor/src/index.ts"
+    },
+    {
+      "doc": "docs/subsystems/workflow.md",
+      "symbol": "WorkflowRunHead",
+      "source": "packages/workflow/workflow-supervisor/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/workflow.md",
+      "symbol": "WorkflowRunListPage",
+      "source": "packages/workflow/workflow-supervisor/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/workflow.md",
+      "symbol": "WorkflowRunAvailableValue",
+      "source": "packages/workflow/workflow-supervisor/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/workflow.md",
+      "symbol": "WorkflowRunValueView",
+      "source": "packages/workflow/workflow-supervisor/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/workflow.md",
+      "symbol": "WorkflowRunChange",
+      "source": "packages/workflow/workflow-supervisor/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/workflow.md",
       "symbol": "WorkflowMeta",
       "source": "packages/workflow/workflow/src/types.ts"
     },

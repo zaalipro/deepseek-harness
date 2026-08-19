@@ -73,6 +73,8 @@ interface FsInfo {
 
 `lstat` is the path-level no-follow metadata primitive. It takes a path instead of an `FsTarget` because `resolve` intentionally follows symlinks to produce stable identity; consumers that need trust-boundary checks can call `lstat` first and reject `symlink` before resolving.
 
+A consumer that must prevent final-component substitution during content I/O does not compose `lstat`, `resolve`, and `readBytes`. It calls `readBytesNoFollow(path, opts, signal, maxBytes)`, which requires one provider descriptor or equivalent object for no-follow open, regular-file validation, and the complete bounded read. Unsupported providers report `FS_IO_ERROR` rather than weakening that guarantee.
+
 ```ts type-equiv
 /**
  * Metadata about a path without following the final path component when it is a
@@ -114,6 +116,8 @@ interface FsDirEntry {
 ## Write and edit guards (provider contract)
 
 Both `writeText` and `editText` take their version guard OPTIONALLY: omit it for an unconditional (bare-provider) mutation, supply it to guard. `writeText`'s guard is an `FsWriteIntent` — `createIfAbsent` creates a missing target and rejects an existing one with `FS_NOT_OBSERVED`, including a target that appears after the provider's initial probe because publication itself must be no-replace; `replaceIfVersion` replaces only when the target exists at the observed version, else `FS_STALE_VERSION`. Omitting `expected` unconditionally creates-or-overwrites. The union itself carries only the two guarded intents; "no guard" is expressed by omission, so write and edit both use the same optional `expected` field.
+
+Path-owned definition publishers use `writeTextNoFollow(path, opts, content, expected, signal, policy)` instead. Its guard is required and remains inside the provider operation through final-entry validation and publication. A final symbolic link is never followed: it is rejected when observed before publication, and a last-moment substitution can only be replaced as the destination entry. Providers unable to guarantee those semantics report `FS_IO_ERROR`.
 
 ```ts type-equiv
 /**
@@ -275,7 +279,7 @@ type FsErrorCode =
 
 ## The service and the plugin
 
-`FileSystem` (`ctx.fs`, abstract) owns the provider primitives: `resolve`, `processPath`, `fileUrl`, `contains`, `stat`, `lstat`, `readText`, `streamText`, `readBytes`, `listDir`, `writeText`, and `editText`. `dsh-fs-observation-policy` registers **no service** — it is a plugin that adds policy through the `fs/*` event gate: it decides the write/edit intent waterfalls from unseen/absent/present state and records `FsObservation` values. The executor is `dsh-tool-fs`: it reads/writes/edits through `ctx.fs`, dispatches the waterfalls, and emits the recording event. The generated [`ctx.fs` section](#ctxfs--filesystem-abstract-seam) below shows the exact signatures.
+`FileSystem` (`ctx.fs`, abstract) owns the provider primitives: `resolve`, `processPath`, `fileUrl`, `contains`, `stat`, `lstat`, `readText`, `streamText`, `readBytes`, `readBytesNoFollow`, `listDir`, `writeText`, `writeTextNoFollow`, and `editText`. `dsh-fs-observation-policy` registers **no service** — it is a plugin that adds policy through the `fs/*` event gate: it decides the write/edit intent waterfalls from unseen/absent/present state and records `FsObservation` values. The executor is `dsh-tool-fs`: it reads/writes/edits through `ctx.fs`, dispatches the waterfalls, and emits the recording event. The generated [`ctx.fs` section](#ctxfs--filesystem-abstract-seam) below shows the exact signatures.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -387,6 +391,42 @@ abstract streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterab
 abstract readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>
 
 /**
+ * Open a caller-supplied path without following its final symbolic-link
+ * component, require the opened object to be a regular file, and return its
+ * complete raw content through that same open object. Ancestor links follow
+ * the backend's normal path rules. Metadata validation and bounded content
+ * I/O must share one descriptor or equivalent provider-owned object; a
+ * provider that cannot guarantee this rejects with `FS_IO_ERROR` rather than
+ * emulating it with separate metadata and read operations.
+ * @param path - the path to open; relative paths resolve against `opts.cwd`.
+ * @param opts - `cwd` overrides the backend's default base for relative paths.
+ * @param signal - aborts before opening and between bounded reads.
+ * @param maxBytes - inclusive byte cap on the complete content.
+ * @returns the full raw content, at most `maxBytes` long.
+ */
+readBytesNoFollow( path: string, opts: { cwd?: string }, signal: AbortSignal | undefined, maxBytes: number, ): Promise<Uint8Array>
+
+/**
+ * Atomically publish complete UTF-8 text at a caller-supplied path without
+ * following its final symbolic-link component. The provider applies the
+ * required create/version guard inside this operation at publication. A
+ * final link observed before publication is rejected; one substituted after
+ * validation may be replaced as the destination path entry, but its target
+ * is never opened or mutated. Ancestor links follow the backend's normal path
+ * rules. A provider that cannot guarantee these semantics rejects with
+ * `FS_IO_ERROR` rather than composing `lstat`, `resolve`, and `writeText`.
+ * @param path - the destination path; relative paths resolve against `opts.cwd`.
+ * @param opts - `cwd` overrides the backend's default base for relative paths.
+ * @param content - the complete UTF-8 text to publish.
+ * @param expected - required guarded create or versioned replacement intent.
+ * @param signal - aborts before atomic publication takes effect.
+ * @param sandboxPolicy - the per-call mode and workspace root enforced by a
+ *   sandboxing backend; omit to leave the backend its deployment default.
+ * @returns the publication outcome and resulting version.
+ */
+writeTextNoFollow( path: string, opts: { cwd?: string }, content: string, expected: FsWriteIntent, signal?: AbortSignal, sandboxPolicy?: SandboxExecutionPolicy, ): Promise<FsWriteOutcome>
+
+/**
  * List direct children of a directory in stable name order. Returns resolved
  * child targets plus cheap metadata only; never reads file contents.
  * @param target - the resolved directory target.
@@ -427,7 +467,7 @@ abstract editText( target: FsTarget, edit: FsEditRequest, expected?: { version: 
 
 Types: [SandboxExecutionPolicy](sandbox.md)
 
-Source: [`packages/fs/fs/src/index.ts:86`](../../packages/fs/fs/src/index.ts)
+Source: [`packages/fs/fs/src/index.ts:87`](../../packages/fs/fs/src/index.ts)
 
 <a id="fs-events"></a>
 
@@ -450,7 +490,7 @@ Single-slot decision for the next FileSystem.editText. Calling `next()` yields a
 'fs/edit-intent'(target: FsTarget, actor: object | undefined, next: () => { version: FsVersion } | undefined | Promise<{ version: FsVersion } | undefined>): Promise<{ version: FsVersion } | undefined>
 ```
 
-Source: [`packages/fs/fs/src/index.ts:66`](../../packages/fs/fs/src/index.ts)
+Source: [`packages/fs/fs/src/index.ts:67`](../../packages/fs/fs/src/index.ts)
 
 <a id="fsobserved--emit"></a>
 
@@ -471,7 +511,7 @@ Record an authoritative positive or negative observation. Listeners must be sync
 'fs/observed'(target: FsTarget, observation: FsObservation, actor: object | undefined): void
 ```
 
-Source: [`packages/fs/fs/src/index.ts:76`](../../packages/fs/fs/src/index.ts)
+Source: [`packages/fs/fs/src/index.ts:77`](../../packages/fs/fs/src/index.ts)
 
 <a id="fswrite-intent--waterfall"></a>
 
@@ -491,5 +531,5 @@ Single-slot decision for the next FileSystem.writeText. Calling `next()` yields 
 'fs/write-intent'(target: FsTarget, actor: object | undefined, next: () => FsWriteIntent | undefined | Promise<FsWriteIntent | undefined>): Promise<FsWriteIntent | undefined>
 ```
 
-Source: [`packages/fs/fs/src/index.ts:58`](../../packages/fs/fs/src/index.ts)
+Source: [`packages/fs/fs/src/index.ts:59`](../../packages/fs/fs/src/index.ts)
 <!-- END GENERATED cordis-surface -->

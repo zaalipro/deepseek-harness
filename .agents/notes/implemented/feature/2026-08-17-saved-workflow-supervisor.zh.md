@@ -1,4 +1,4 @@
-# Agent Note：已保存的工作流、斜杠命令与后台运行监督器
+# Agent Note: 已保存的工作流、斜杠命令与后台运行监督器
 
 Status: implemented
 
@@ -6,52 +6,56 @@ Status: implemented
 
 ## 问题
 
-动态工作流 seam 一开始是内联执行模型编写的脚本，并在父轮次里阻塞等待其结束。三项贴近 Grok Build 形态的能力一直处于搁置：磁盘上的已保存工作流定义、人类斜杠命令入口，以及带实时名册、显示名句柄、暂停/恢复与停止/保存的后台运行生命周期。Web 聊天渲染器（`ui-workflow-run`）只展示了持久的顶层运行历史而没有控制能力，且代理之外没有任何东西读取工作流运行——因此引擎一直待在 preset 作用域里。
+动态工作流 seam 提供了由持有方负责的脚本执行，但普通工具会在发起轮次中收集每次运行。定义无法作为文件共享，人类没有命令入口，浏览器也没有用于后台工作的有界控制与检查 API。可用的分离生命周期还必须区分一个逻辑运行与它的各次引擎尝试，在进程重启后保留可检查历史而不声称执行得到恢复，并把完成结果交付给精确的发起 Agent，同时不能制造无界的模型轮次序列。
 
 ## 决策
 
-已保存工作流、斜杠命令与运行监督被拆成三个 Host-plane 新增组件，加上一个被拓宽的引擎，全部挂载在 Web 组合里。
+已保存定义、会话所属的监督器、Host 启动命令，以及浏览器所属的 dashboard 在 Web 组合中形成一条工作流产品路径。
 
-### 已保存定义（`dsh-workflow-registry`）
+### 已保存定义
 
-一个定义就是一个 JSON 封套 `<name>.workflow.json`，含 `{ meta, script }`：meta 作为脚本旁边的数据被校验（从不求值），文件名必须等于 `meta.name`（kebab-case），未知 meta 字段会大声失败。发现按优先级扫描三个根——bundled > project（`.dsh/workflows`）> user（`<dshHome>/workflows`）——以 `meta.name` 为键，chokidar 监视器会使目录失效并发 `workflows/change`。`ctx.workflows` 提供排序后的摘要与完整定义；格式错误文件会在发现阶段带着路径与原因大声失败。
+`dsh-workflow-registry` 从 bundled、project（`.dsh/workflows`）和 user（`<dshHome>/workflows`）根目录发现包含 `{ meta, script }` 的 `<name>.workflow.json` 封套，优先级为 bundled > project > user。元数据按数据校验，文件名必须匹配 kebab-case 的 `meta.name`，未知字段或格式错误定义会连同所属路径明确失败。注册表每次 lookup 都会重新读取；监视器发出的 `workflows/change` 是刷新提示，而不是唯一的新鲜度来源。project 与 user 保存通过文件系统能力执行，并带链接拒绝和并发发布保护。
 
-### 运行监督器（`dsh-workflow-supervisor`）
+### 逻辑运行与引擎尝试
 
-`ctx.workflowSupervisor` 拥有每一个存活的 `WorkflowRun` 句柄，因此启动可以立即返回。运行以会话唯一的显示名作为键——首个存活/保留运行用 `meta.name`，之后是 `meta.name-2`、`meta.name-3`——从不用内部 id；带编号的句柄是给人用的，不是定义名。一次启动会在 `<dshHome>/workflow-runs/<目录 id>` 下写出可编辑的 `script.js` 投影和一个 `scratch/` 目录。子代理结果按调用顺序从新的 `workflow/agent-result` 事件记入日志（journal），项目作用域为：`workflow/start|phase|log|gate|agent-start|agent-end|agent-result|end` 是监督器折叠成实时名册视图的只观察 wire，再以整集 `session/workflow-runs` 帧推送到浏览器（与 `session/jobs` 同一姿势）。
+`dsh-workflow-supervisor` 拥有每个已接受的活动 `WorkflowRun`，因此 `start()` 在持久发布后返回稳定逻辑 `runId`、会话唯一显示句柄和可编辑脚本路径。逻辑 id 跨越暂停、gate 和预算恢复尝试；每次引擎尝试保留自己独立的引擎运行 id。成员序号和累计 `agentsStarted` 跨尝试继续增长。`WorkflowJournalEntry.ordinal` 记录一个跨尝试且无空缺的提交发布顺序，而稳定调用身份及其请求指纹决定回放对应关系，而不会再次启动同一个子项。
 
-### 暂停 / 恢复 / 停止 / 保存
+某工作流名称的首个保留运行直接使用该名称作为显示句柄；后续运行使用单调编号句柄。每个运行目录包含私有 `script.js` 投影和 `scratch/`。`pause` 会先取消并 dispose 当前尝试，再带 journal 停放逻辑运行。`await_user()` 保持当前 worker 停放，并在带尝试 fence 的问题得到确认后继续；`pause()` 则在恢复后重新触发其条件。预算受限运行只有在调用方提供更高的绝对预算时才能恢复；普通暂停或等待输入的运行会拒绝预算变化。`stop` 发布一次终态取消。`save` 通过定义注册表读取有界的可编辑投影，并拒绝 bundled 或带编号运行。
 
-- `pause` 取消运行并标记为 `paused`，保留已提交 journal。`resume` 用 journal 回放重新执行原来不可变的脚本、args 与预算（被回放的 `agent()` 调用返回已提交结果且不花预算）。
-- 脚本级 `await_user(kind, message)` 停放存活的 worker，resume 会越过它；`pause(kind, message)` 在每次 resume 时重新触发。门控显示为 `Needs input`。
-- `stop` 取消并标记 `cancelled`；进程退出会把活动运行标记为 `interrupted`，不可恢复。
-- `save` 把运行的脚本投影写回 project/user 定义；它拒绝内置项与带编号句柄。
-- 完成时通过 `agent.inject` 注入包含结果的父可见通知，使报告不埋在面板里。
+### 保留 manifest 与有界 Remote 读取
 
-### 斜杠命令（`dsh-command-workflows`）
+每个 Session 都有一个有界 manifest 名册，保存显示名序号、运行摘要、预算与成员摘要、日志尾部、gate 展示、一个有界结果投影和 scratch 工件元数据。恢复返回前，会把所有原活动行提交为终态 `interrupted`。恢复只还原检查状态，不还原 `Agent`、引擎尝试、脚本、args、journal 或恢复权限；因此恢复行没有可编辑 `scriptPath`，也不能保存。保留驱逐会删除匹配的内存终态行和运行目录，因此恢复数据与活动名册不会产生重复行。
 
-Host-plane 的 `/workflow`（启动 + `pause|resume|stop|save` 语法）、`/workflows`（空成功；客户端在 `command/executed` 时打开面板）、`/create-workflow`（引导模型进入内置的 `create-workflow` 技能），以及每个已保存 `meta.name` 一个启动命令，随 `workflows/change` 刷新，与内置命令撞名时静默让出裸名。命令文本中从不出现在何内部 id。
+Typert `workflowRuns` Remote 是浏览器的权威来源。`list` 返回带进程 epoch 与逐 Session revision 的有界分页；`detail`、`members`、`memberDetail`、`logs`、`result`、`artifacts` 和 `artifact` 按需加载选中数据；`control` 通过可选的预期运行 revision 检查执行 Pause、Resume、Stop 或 Save。不透明 cursor 绑定到一个 collection revision，过期时失败。列表行只含有界计数、collection revision 和 `allowedActions`，绝不含完整成员或输出。脚本可见的成员结果与最终值区分 `pending`、`available`、`not-produced` 和 `evicted`；scratch 文件按 UTF-8 安全的分页块读取。
 
-### 引擎拓宽（`dsh-workflow-worker-thread`）
+`workflows/run-change` 携带一项 `upsert` 或 `remove`、逐 Session 的 `invalidate`，或载体丢弃已排队 Session 变更时的 `invalidate-all`。每个有地址的变更都携带 epoch 与下一个 Session revision，因此客户端遇到缺口或 epoch 不匹配时会重新读取，而不是合并不确定状态。
 
-脚本表面新增 `complete(value)`、`pause`/`await_user`、`budget()`、`write_scratch_file`/`read_scratch_file`、`parallel([...job maps])` 重载、journal 回放与 `validate_only`（罐头 `agent()` 结果、无子代理、无记录）。因为监督器与命令从任何代理作用域之外读取它，引擎移到了 Host plane。
+### 完成交付与完全停稳
 
-### Web 面板（`dsh-client-ui-workflows`）
+一次终态发布最多为精确的发起 Agent 对象产生一条受 UTF-8 字节限制的通知。交付前已预留的运行会加入同一完成批次。在低于连续完成唤醒上限时，每个批次中第一条交付的通知都使用 `followup`，不受所有者当前状态影响，该批次其余通知使用 `inject`；后续批次可在达到上限前继续打开轮次。只有已认领的人类输入会重置该所有者的唤醒计数。通知会在字节上限内保留 dashboard 恢复指引，并在存在时保留约定的 `scratch/report.md` 引用。
 
-一个全屏 `shell.overlay` 条目从运行时镜像读取 `workflowRunsBySession`；暂停/恢复/停止/保存通过命令 Remote 执行 `/workflow` 命令。聊天内的 `workflow-run` 节点仍是持久表面；面板是额外的。
+`whenOwnerQuiescent()` 会对已预留启动、运行中尝试、持久终态发布、完成交付和由完成唤醒的轮次求固定点。人类 gate、用户暂停和预算受限运行属于已停放状态，因此视为完全停稳。这使 one-shot 组合可以等待所属后台工作，而不会把已停放运行当作活动执行。
+
+### 命令、持久 Chat 与 dashboard
+
+`dsh-command-workflows` 拥有 `/workflow`、`/create-workflow` 和 cwd 作用域的已保存定义别名。现有命令保留冲突的裸名；工作流别名会重复添加 `workflow-` 限定直到名称可用，同时每个定义保留自己的裸名，`/workflow <name>` 仍是规范形式。定义或命令注册表变化时会重新协调别名。`/create-workflow` 通过标准 user-explicit skill 路径进入确定性的 bundled 编写 skill。`/workflows` 是浏览器所属的 client action：打开 overlay 不执行 Host 命令，也不追加命令生命周期行。
+
+`dsh-workflow-run-recorder` 为每条人类启动命令或根 `workflow` 工具调用恰好包装一次显式归因的 supervisor 启动，并以稳定逻辑运行 id 投影一条持久 Chat 生命周期。嵌套、内部与未归因启动仅出现在 dashboard。来自每次引擎尝试的成员事件都会加入同一记录，而暂停、输入 gate 或预算停止不会关闭它。浏览器的 `WorkflowRunsController` 惰性订阅选中的 Session，应用带 revision 的有界摘要，遇到缺口时重新读取，并把详情与输出留作按需访问。dashboard 控制直接调用 typed Remote。子 transcript 链接会刷新直接子项目录，并且仅打开精确、健康的 one-shot 子项，无论该子项仍在运行还是已经结算。
 
 ## 验证
 
-包测试覆盖封套解析与发现优先级、监督器显示名分配、journal 重跑、保存拒绝、退出即中断，以及 `/workflow` 语法。worker 线程测试通过进程内 MessageChannel 覆盖每一个新钩子（complete、budget、门控、journal 回放、parallel 映射、scratch、validate_only）。浏览器烟雾测试覆盖组装后的斜杠菜单、一次后台启动、面板名册与一次暂停/恢复循环。
+包级覆盖钉住 manifest 解码与保留、恢复为 interrupted、重复行驱逐、跨尝试的稳定逻辑身份、累计预算与 journal 回放、过期控制与 cursor、分页值与工件读取、gate fence、精确所有者完成交付、唤醒上限、所有者完全停稳、显式命令与工具归因，以及孤立 Chat 记录的重启协调。运行时测试钉住 baseline／change 顺序、epoch 与 revision 缺口、重连与移除 fence，以及按需操作。组装后的工作流回放钉住后台启动、后续完成轮次与持久逻辑生命周期；Web 冒烟测试钉住 client 所属的 `/workflows` action 和真实 dashboard 控制。
 
-## 备选方案
+## 曾考虑的替代方案
 
-**基于 session-projection 键的面板。** 被否：运行状态是进程本地的、内容多、每次运行变化多次；整集 `session/workflow-runs` 帧与 `session/jobs` 完全一致，让面板保持为监督器的只读投影。
+**整集 `session/workflow-runs` 帧。** 被拒绝，因为完整名册与输出会随保留历史增长，并迫使每项变更都经过一个 eager 镜像。有界摘要加带 revision 的失效通知能保持转发事件很小，并把昂贵 collection 变成显式读取。
 
-**Per-preset 监督器 + Host-plane 命令。** 被否：api-proxy 无法读取 preset 作用域的监督器来推帧，命令也无法解析运行注册表。
+**让 `/workflows` 与 dashboard 控制执行 Host 命令。** 被拒绝，因为打开浏览器视图不是 Host 命令，而且控制已有经过授权、带 revision 检查的 Remote。由浏览器负责可避免错误的命令 transcript 行，也避免为同一操作维护第二个解析器。
 
-**保留前台工具语义再叠一层轮询。** 被否：由监督器拥有存活运行，才能在不引入第二个生命周期 Owner 的前提下正确做到后台启动、取消与完成通知。
+**从 manifest 恢复活动执行。** 被拒绝，因为持久视图不包含正确继续所需的活动 Agent、引擎资源、不可变输入或已提交回放 journal。恢复报告中断并保留检查能力，而不会凭空制造恢复权限。
+
+**按 Session id 交付完成或允许无限 follow-up。** 被拒绝，因为替换后的 Agent 不应继承另一个实例的完成，而且连续完成批次可能递归消耗轮次。按精确对象路由、每批次仅唤醒一次并限制连续唤醒，在交付与无界循环之间取得明确约束。
 
 ## 后果
 
-工作流运行现在以可后台、可暂停、可恢复、可停止的工作存在，并带实时面板；持久的 `tool-workflow/*` 聊天记录与通用工具卡保持不变。定义是可放进 git 分享的普通文件。journal 回放对外部副作用从不是恰好一次——其结果在暂停前未提交的副作用可能再次执行；有副作用的步骤必须保持幂等，且跨进程恢复被有意不支持（活动运行变为 `Interrupted`）。
+工作流成为带共享定义、可后台、可检查、可控制的逻辑运行，并拥有持久保留视图。代价是显式 revision、保留和恢复机制，以及逻辑身份与尝试身份的分离。journal 回放无法为取消前尚未提交结果的外部副作用提供恰好一次保证，因此有副作用的工作流步骤仍须保持幂等。进程重启会保留有界检查数据并把活动工作标记为 Interrupted；它不支持跨进程恢复，也不能保存恢复行的脚本投影。
